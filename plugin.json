@@ -1,0 +1,14 @@
+{
+  "name": "save-token",
+  "displayName": "Save Token",
+  "description": "Universal token-saving toolkit across code, data, CLIs, browser control, and 0-LLM cross-session handoff (SQLite FTS5+Trigram + RTK compaction + CLI-first).",
+  "version": "1.2.0",
+  "author": "Rikku_desu~",
+  "homepage": "https://github.com/rikkurea-boop/save-token#readme",
+  "repository": "https://github.com/rikkurea-boop/save-token",
+  "suggestedPrompts": [
+    "Use save_token_exec to scan, filter, and process multiple files or CLI outputs in one compact turn",
+    "Create a 0-LLM context handoff with save_token_handoff before starting a fresh chat",
+    "Check save_token_stats to inspect bytes saved, persisted memory, and indexed FTS5 sources"
+  ]
+}

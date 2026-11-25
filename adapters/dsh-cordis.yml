@@ -1,0 +1,11 @@
+# Add under `plugins:` in your DeepSeek Harness cordis.yml
+# Skill path ~/.agents/skills/save-token is picked up automatically by @deepseek-ai/dsh-skill-filesystem
+- id: mcp-save-token
+  name: '@deepseek-ai/dsh-mcp-client'
+  enabled: true
+  config:
+    transport: stdio
+    command: "node"
+    args:
+      - "--no-warnings=ExperimentalWarning"
+      - "/ABSOLUTE/PATH/TO/.save-token/server/save-token-mcp.mjs"

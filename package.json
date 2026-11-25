@@ -1,0 +1,39 @@
+{
+  "name": "save-token-mcp",
+  "version": "1.2.0",
+  "description": "Zero-dependency universal token-saving MCP server, CLI-first playbook, browser tight-scoping guide, and 0-LLM session handoff for Antigravity, Claude Code, Codex, DeepSeek Harness, Cursor, and Gemini CLI.",
+  "type": "module",
+  "author": "Rikku_desu~",
+  "homepage": "https://github.com/rikkurea-boop/save-token#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rikkurea-boop/save-token.git"
+  },
+  "license": "MIT",
+  "bin": {
+    "save-token-mcp": "./server/save-token-mcp.mjs",
+    "save-token-install": "./install.mjs"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "start": "node --no-warnings=ExperimentalWarning server/save-token-mcp.mjs",
+    "install:auto": "node install.mjs --target auto",
+    "test": "node server/test-save-token.mjs && node server/test-installer.mjs",
+    "test:mcp": "node server/test-save-token.mjs",
+    "test:installer": "node server/test-installer.mjs"
+  },
+  "keywords": [
+    "mcp",
+    "token-optimization",
+    "code-mode",
+    "save-token",
+    "antigravity",
+    "claude-code",
+    "codex",
+    "deepseek-harness",
+    "cursor",
+    "gemini-cli"
+  ]
+}

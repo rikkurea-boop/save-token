@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "save-token": {
+      "command": "node",
+      "args": [
+        "--no-warnings=ExperimentalWarning",
+        "/ABSOLUTE/PATH/TO/.save-token/server/save-token-mcp.mjs"
+      ]
+    }
+  }
+}

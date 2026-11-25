@@ -1,0 +1,7 @@
+# Add to ~/.codex/config.toml (or .codex/config.toml)
+[mcp_servers.save-token]
+command = "node"
+args = [
+  "--no-warnings=ExperimentalWarning",
+  "/ABSOLUTE/PATH/TO/.save-token/server/save-token-mcp.mjs"
+]
