@@ -20,8 +20,6 @@ const CORE_ITEMS = [
   "skills",
   "rules",
   "plugin.json",
-  ".claude-plugin",
-  ".mcp.json",
 ];
 
 function toPosix(p) {

@@ -14,7 +14,7 @@ Hoạt động trên **Antigravity**, **Claude Code**, **Codex**, **DeepSeek Har
 | :--- | :--- | :--- |
 | **Tự động nhận diện (Khuyên dùng)** | Tự quét các công cụ có sẵn trên máy + cài `~/.save-token` & `~/.agents/skills/save-token` | `node install.mjs` |
 | **Antigravity** | `~/.gemini/config/plugins/save-token` (`plugin.json`, `mcp_config.json`, `skills/`, `rules/`) | `node install.mjs --target antigravity` |
-| **Claude Code** | `~/.claude.json` (`mcpServers.save-token`) + `~/.claude/skills/save-token` (hoặc dùng trực tiếp `.claude-plugin/plugin.json` + `.mcp.json`) | `node install.mjs --target claude` |
+| **Claude Code** | `~/.claude.json` (`mcpServers.save-token`) + `~/.claude/skills/save-token` | `node install.mjs --target claude` |
 | **Codex** | `~/.codex/config.toml` (`[mcp_servers.save-token]`) + `~/.agents/skills/save-token` | `node install.mjs --target codex` |
 | **DeepSeek Harness (`dsh`)** | `~/.agents/skills/save-token` + `~/.dsh/save-token.cordis.yml` + `~/.dsh/save-token.AGENTS.md` | `node install.mjs --target dsh` |
 | **Cursor** | `~/.cursor/mcp.json` + `~/.agents/skills/save-token` | `node install.mjs --target cursor` |
