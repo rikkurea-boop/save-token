@@ -21,7 +21,7 @@ Works across **Antigravity**, **Claude Code**, **Codex**, **DeepSeek Harness (`d
 | **Gemini CLI** | `~/.gemini/settings.json` + `~/.agents/skills/save-token` | `node install.mjs --target gemini-cli` |
 | **All platforms** | Installs every target above without clobbering existing config keys | `node install.mjs --target all` |
 
-> **Preview / Uninstall:** Add `--dry-run` to preview changes, or `--uninstall --target <name>` to cleanly remove `save-token` entries without touching your other MCP servers.
+> **Options:** Add `--dry-run` to preview changes, `--skip-browser` to skip installing `agent-browser`, or `--uninstall --target <name>` to cleanly remove `save-token` entries without touching your other MCP servers.
 
 ---
 
@@ -48,12 +48,8 @@ node install.mjs          # Auto-detects & configures your installed agent harne
 ### DeepSeek Harness (`dsh`) Extra Step
 `install.mjs --target dsh` installs the skill to `~/.agents/skills/save-token` (loaded automatically by `@deepseek-ai/dsh-skill-filesystem`) and writes `~/.dsh/save-token.cordis.yml`. Copy the `- id: mcp-save-token` block into your `cordis.yml` `plugins:` list (see [`adapters/dsh-cordis.yml`](./adapters/dsh-cordis.yml)).
 
-### Optional: Tier-1 Headless Browser CLI (`agent-browser`)
-For zero-screenshot browser automation (`snapshot -i` accessibility tree with `@e1` refs, `react`, `network`, `webmcp`):
-
-```bash
-npm install -g agent-browser
-```
+### Default Browser CLI (`agent-browser`)
+`node install.mjs` **automatically installs [`agent-browser`](https://github.com/vercel-labs/agent-browser) globally** (`npm install -g agent-browser`) if it is not already on your `PATH`, enabling zero-screenshot browser automation (`snapshot -i` accessibility tree with `@e1` refs, `react`, `network`, `webmcp`). Pass `--skip-browser` if you only want the MCP server and skills.
 
 ---
 

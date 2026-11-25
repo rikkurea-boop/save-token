@@ -21,7 +21,7 @@ Hoạt động trên **Antigravity**, **Claude Code**, **Codex**, **DeepSeek Har
 | **Gemini CLI** | `~/.gemini/settings.json` + `~/.agents/skills/save-token` | `node install.mjs --target gemini-cli` |
 | **Tất cả nền tảng** | Cài cho toàn bộ 6 nền tảng trên mà không ghi đè cấu hình cũ | `node install.mjs --target all` |
 
-> **Xem trước / Gỡ cài đặt:** Thêm `--dry-run` để xem trước thay đổi, hoặc `--uninstall --target <tên>` để gỡ sạch `save-token` mà giữ nguyên các MCP server khác.
+> **Tùy chọn:** Thêm `--dry-run` để xem trước thay đổi, `--skip-browser` nếu không muốn tự cài `agent-browser`, hoặc `--uninstall --target <tên>` để gỡ sạch `save-token` mà giữ nguyên các MCP server khác.
 
 ---
 
@@ -48,12 +48,8 @@ node install.mjs          # Tự động nhận diện và cấu hình các côn
 ### Lưu ý thêm cho DeepSeek Harness (`dsh`)
 Lệnh `node install.mjs --target dsh` sẽ cài skill vào `~/.agents/skills/save-token` (được `@deepseek-ai/dsh-skill-filesystem` tự động nạp) và tạo sẵn tệp `~/.dsh/save-token.cordis.yml`. Bạn chỉ cần chép khối `- id: mcp-save-token` vào mục `plugins:` trong `cordis.yml` đang dùng (xem mẫu [`adapters/dsh-cordis.yml`](./adapters/dsh-cordis.yml)).
 
-### Tùy chọn: CLI trình duyệt không chụp ảnh (`agent-browser`)
-Để điều khiển trình duyệt bằng cây accessibility (`snapshot -i` với ref ngắn `@e1`), đọc React Fiber (`react`) và soi API (`network`) mà không cần stream ảnh:
-
-```bash
-npm install -g agent-browser
-```
+### Trình duyệt CLI mặc định (`agent-browser`)
+Khi chạy `node install.mjs`, bộ cài đặt sẽ **tự động cài [`agent-browser`](https://github.com/vercel-labs/agent-browser) toàn cục** (`npm install -g agent-browser`) nếu máy chưa có sẵn, giúp điều khiển trình duyệt không cần chụp ảnh (`snapshot -i` với ref ngắn `@e1`, đọc React Fiber `react`, soi API `network`, `webmcp`). Thêm cờ `--skip-browser` nếu bạn chỉ muốn cài MCP server và skill.
 
 ---
 

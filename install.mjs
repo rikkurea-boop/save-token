@@ -6,6 +6,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const REPO_ROOT = path.dirname(fileURLToPath(import.meta.url));
@@ -32,12 +33,19 @@ function resolveHome() {
 }
 
 function parseArgs(argv) {
-  const opts = { targets: ["auto"], dryRun: false, uninstall: false, help: false };
+  const opts = {
+    targets: ["auto"],
+    dryRun: false,
+    uninstall: false,
+    skipBrowser: process.env.SAVE_TOKEN_SKIP_BROWSER === "1",
+    help: false,
+  };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--help" || a === "-h") opts.help = true;
     else if (a === "--dry-run") opts.dryRun = true;
     else if (a === "--uninstall") opts.uninstall = true;
+    else if (a === "--skip-browser") opts.skipBrowser = true;
     else if (a === "--target" && argv[i + 1]) {
       opts.targets = argv[++i]
         .split(",")
@@ -52,7 +60,7 @@ function printHelp() {
   console.log(`save-token-install — Universal installer (Node >= 22.5, zero dependencies)
 
 Usage:
-  node install.mjs [--target <list>] [--dry-run] [--uninstall]
+  node install.mjs [--target <list>] [--dry-run] [--skip-browser] [--uninstall]
 
 Targets:
   auto         Detect installed harnesses (default)
@@ -62,7 +70,12 @@ Targets:
   codex        ~/.agents/skills/save-token + ~/.codex/config.toml
   dsh          ~/.agents/skills/save-token + ~/.dsh/save-token.cordis.yml
   cursor       ~/.agents/skills/save-token + ~/.cursor/mcp.json
-  gemini-cli   ~/.agents/skills/save-token + ~/.gemini/settings.json`);
+  gemini-cli   ~/.agents/skills/save-token + ~/.gemini/settings.json
+
+Options:
+  --dry-run       Preview actions without writing files or running npm install
+  --skip-browser  Skip automatic global installation of agent-browser CLI
+  --uninstall     Remove save-token files and config blocks cleanly`);
 }
 
 function detectTargets(home) {
@@ -154,7 +167,7 @@ function removeTomlBlock(filePath, dryRun) {
   return true;
 }
 
-function findAgentBrowser() {
+function findExecutable(name) {
   const rawPath = process.env.PATH || process.env.Path || "";
   const dirs = rawPath.split(path.delimiter).filter(Boolean);
   if (process.platform === "darwin") {
@@ -165,7 +178,7 @@ function findAgentBrowser() {
   const exts = process.platform === "win32" ? [".cmd", ".exe", ".bat", ""] : [""];
   for (const dir of dirs) {
     for (const ext of exts) {
-      const candidate = path.join(dir, `agent-browser${ext}`);
+      const candidate = path.join(dir, `${name}${ext}`);
       try {
         if (fs.statSync(candidate).isFile()) return toPosix(candidate);
       } catch {
@@ -174,6 +187,40 @@ function findAgentBrowser() {
     }
   }
   return null;
+}
+
+function ensureAgentBrowser(opts) {
+  const existing = findExecutable("agent-browser");
+  if (existing) {
+    console.log(`agent-browser: already installed at ${existing}`);
+    return;
+  }
+  if (opts.skipBrowser) {
+    console.log("agent-browser: skipped (--skip-browser)");
+    return;
+  }
+  if (opts.dryRun) {
+    console.log("agent-browser: would install globally via `npm install -g agent-browser`");
+    return;
+  }
+
+  const npmBin = findExecutable("npm");
+  if (!npmBin) {
+    console.warn("agent-browser: npm not found on PATH — install manually later with `npm install -g agent-browser`.");
+    return;
+  }
+
+  console.log("agent-browser: installing globally by default (`npm install -g agent-browser`)...");
+  const res = spawnSync(npmBin, ["install", "-g", "agent-browser"], {
+    stdio: "inherit",
+    shell: process.platform === "win32",
+  });
+  if (res.status === 0) {
+    const installedPath = findExecutable("agent-browser");
+    console.log(`agent-browser: installed${installedPath ? ` at ${installedPath}` : ""}`);
+  } else {
+    console.warn("agent-browser: auto-install failed (MCP tools still work). Retry manually: `npm install -g agent-browser`.");
+  }
 }
 
 function installForTargets(targets, home, opts) {
@@ -339,12 +386,7 @@ function main() {
   for (const a of actions) console.log(`  - ${a}`);
 
   if (!opts.uninstall) {
-    const ab = findAgentBrowser();
-    console.log(
-      ab
-        ? `Optional CLI: agent-browser found at ${ab}`
-        : "Optional CLI tip: run `npm install -g agent-browser` for zero-screenshot Tier-1 browser control."
-    );
+    ensureAgentBrowser(opts);
   }
 }
 

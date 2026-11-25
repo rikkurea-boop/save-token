@@ -10,10 +10,15 @@ const execFileAsync = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const INSTALLER = path.resolve(__dirname, "../install.mjs");
 
-async function runInstaller(args, fakeHome) {
-  return execFileAsync(process.execPath, [INSTALLER, ...args], {
-    env: { ...process.env, SAVE_TOKEN_HOME: fakeHome },
-  });
+async function runInstaller(args, fakeHome, { clearPath = false, skipBrowser = true } = {}) {
+  const env = { ...process.env, SAVE_TOKEN_HOME: fakeHome, SAVE_TOKEN_SKIP_BROWSER: skipBrowser ? "1" : "0" };
+  if (clearPath) {
+    for (const k of Object.keys(env)) {
+      if (/^path$/i.test(k)) delete env[k];
+    }
+    env.PATH = "";
+  }
+  return execFileAsync(process.execPath, [INSTALLER, ...args], { env });
 }
 
 async function exists(p) {
@@ -127,7 +132,21 @@ async function main() {
     assert.equal(await exists(path.join(fakeEmptyHome, ".save-token", "server", "save-token-mcp.mjs")), true);
     assert.equal(await exists(path.join(fakeEmptyHome, ".agents", "skills", "save-token", "SKILL.md")), true);
 
-    console.log("ALL INSTALLER TESTS PASSED (6 PLATFORMS + IDEMPOTENCY + UNINSTALL + AUTO)");
+    // 6. Default agent-browser auto-install behavior (unless --skip-browser or already on PATH)
+    if (process.platform !== "darwin") {
+      const defBrowser = await runInstaller(["--target", "all", "--dry-run"], fakeEmptyHome, {
+        clearPath: true,
+        skipBrowser: false,
+      });
+      assert.match(defBrowser.stdout, /would install globally via/);
+    }
+    const skipFlag = await runInstaller(["--target", "all", "--dry-run", "--skip-browser"], fakeEmptyHome, {
+      clearPath: true,
+      skipBrowser: false,
+    });
+    assert.match(skipFlag.stdout, /skipped \(--skip-browser\)|already installed/);
+
+    console.log("ALL INSTALLER TESTS PASSED (6 PLATFORMS + IDEMPOTENCY + UNINSTALL + AUTO + DEFAULT BROWSER)");
   } finally {
     await fs.rm(fakeHome, { recursive: true, force: true });
     await fs.rm(fakeEmptyHome, { recursive: true, force: true });
