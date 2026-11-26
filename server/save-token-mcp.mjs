@@ -21,7 +21,7 @@ const DEFAULT_IGNORES = new Set([
   ".venv",
 ]);
 
-const SERVER_INFO = { name: "save-token", version: "1.2.0" };
+const SERVER_INFO = { name: "save-token", version: "1.1.0" };
 const DEFAULT_CHUNK_BYTES = 1500;
 const MAX_BG_STREAM_BYTES = 4 * 1024 * 1024;
 const STRIPPED_ENV_KEYS = new Set([
@@ -32,24 +32,18 @@ const STRIPPED_ENV_KEYS = new Set([
   "DENO_OPTIONS",
 ]);
 
-function resolveDefaultDbPath() {
-  if (process.env.SAVE_TOKEN_DB_PATH) return process.env.SAVE_TOKEN_DB_PATH;
-  const agyDir = path.join(os.homedir(), ".gemini", "antigravity");
-  if (fsSync.existsSync(agyDir)) {
-    return path.join(agyDir, "plugin_data", "save-token", "store.db");
-  }
-  return path.join(os.homedir(), ".save-token", "store.db");
-}
-
-const DB_PATH = resolveDefaultDbPath();
+const DB_PATH =
+  process.env.SAVE_TOKEN_DB_PATH ||
+  path.join(os.homedir(), ".gemini", "antigravity", "plugin_data", "save-token", "store.db");
 const HANDOFF_DIR = path.join(path.dirname(DB_PATH), "handoffs");
-const ANTIGRAVITY_BRAIN_DIR = path.join(os.homedir(), ".gemini", "antigravity", "brain");
+const ANTIGRAVITY_BRAIN_DIR =
+  process.env.ANTIGRAVITY_BRAIN_DIR || path.join(os.homedir(), ".gemini", "antigravity", "brain");
 
 const TOOL_DEFINITIONS = [
   {
     name: "save_token_exec",
     description:
-      "Universal token-saving JS REPL across code, data, docs, static web, and CLIs: persists `state` across turns, runs ``await $`...`.compact()``, `tools.fetchText(url)`, `tools.compactOutput()`, `tools.detectClis()`, `tools.saveMemory`/`loadMemory`, `tools.*`, and indexes large output into SQLite FTS5+Trigram.",
+      "REPL JavaScript cục bộ tối ưu token cho mọi tác vụ (code, dữ liệu, tài liệu, web tĩnh, CLI): giữ `state` xuyên lượt, hỗ trợ ``await $`...`.compact()``, `tools.fetchText(url)`, `tools.compactOutput()`, `tools.detectClis()`, `tools.saveMemory`/`loadMemory`, `tools.*`, và tự động index SQLite FTS5+Trigram bền vững.",
     inputSchema: {
       type: "object",
       properties: {
@@ -78,7 +72,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "save_token_poll",
     description:
-      "Check, wait for, or kill background jobs started via `tools.spawnBg(cmd)` with optional RTK compaction (`compact`) and FTS5 `intent` filtering.",
+      "Kiểm tra, chờ hoặc hủy tác vụ nền khởi chạy bởi `tools.spawnBg(cmd)`, hỗ trợ nén RTK (`compact`) và lọc `intent` qua FTS5.",
     inputSchema: {
       type: "object",
       properties: {
@@ -95,7 +89,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "save_token_search",
     description:
-      "Query large outputs and indexed sources stored in persistent SQLite (Porter BM25 + Trigram) across current and previous sessions.",
+      "Truy vấn lại dữ liệu/output lớn đã index trong kho SQLite bền vững (Porter BM25 + Trigram), hoạt động xuyên nhiều phiên chat.",
     inputSchema: {
       type: "object",
       properties: {
@@ -110,12 +104,15 @@ const TOOL_DEFINITIONS = [
   {
     name: "save_token_handoff",
     description:
-      "Build a zero-LLM session handoff snapshot: optionally extracts prompts/touched files/errors from a transcript, persists chosen `state` keys into SQLite `kv_memory`, and writes a compact `.md` file for starting a fresh chat.",
+      "Đóng gói bàn giao ngữ cảnh phiên chat (0 token LLM): tự trích xuất yêu cầu, kết luận cuối, checkpoint/plan, tệp sửa và lỗi từ transcript (hỗ trợ conversationId dạng full UUID, prefix >= 6 ký tự hoặc 'latest'), lưu SQLite + tệp `.md` cô đọng.",
     inputSchema: {
       type: "object",
       properties: {
-        title: { type: "string", description: "Short title for the handoff snapshot." },
-        conversationId: { type: "string", description: "Optional Antigravity conversationId to extract recent user prompts, touched files, and errors." },
+        title: { type: "string", description: "Short title (optional when conversationId or transcriptPath is supplied)." },
+        conversationId: {
+          type: "string",
+          description: "Antigravity conversationId (full UUID, 6+ char prefix, or 'latest') to distill into a handoff .md file.",
+        },
         transcriptPath: { type: "string", description: "Optional explicit path to transcript_full.jsonl." },
         project: { type: "string", description: "Optional project name or path." },
         goal: { type: "string", description: "Current primary goal." },
@@ -123,26 +120,37 @@ const TOOL_DEFINITIONS = [
         nextSteps: { type: "array", items: { type: "string" }, description: "Ordered remaining next steps." },
         openRisks: { type: "array", items: { type: "string" }, description: "Open issues or caveats." },
         saveStateKeys: { type: "array", items: { type: "string" }, description: "Keys from `state` to persist into kv_memory." },
-        maxChars: { type: "number", default: 2400, description: "Max characters for handoff Markdown (800..6000)." },
+        maxChars: { type: "number", default: 3800, description: "Max bytes/chars for handoff Markdown (800..8000)." },
+        force: { type: "boolean", default: false, description: "Rebuild handoff even if transcript source cache matches." },
       },
-      required: ["title"],
+      required: [],
     },
   },
   {
     name: "save_token_resume",
     description:
-      "3-layer progressive disclosure resume from previous sessions: omit `handoffId` for a compact list; pass `'latest'` or `<id>` for summary, `memoryKeys`, and `indexedSources`.",
+      "Nạp lại ngữ cảnh phiên chat theo cơ chế 3 tầng (0 token LLM): bỏ trống để liệt kê, truyền `handoffId` ('latest' hoặc `<id>`), hoặc truyền thẳng `conversationId` (`<id|prefix|latest>`) để tự động chạy `save_token_handoff` xuất file `.md` cho phiên cũ đó rồi đọc lại ngay.",
     inputSchema: {
       type: "object",
       properties: {
         handoffId: { type: "string", description: "Omit for compact list; pass 'latest' or exact handoffId to load details." },
+        conversationId: {
+          type: "string",
+          description:
+            "Antigravity conversationId (full UUID, 6+ char prefix, or 'latest'). Automatically runs 0-LLM handoff to .md (cached by transcript mtime) and returns the summary.",
+        },
+        maxChars: {
+          type: "number",
+          default: 3800,
+          description: "Max bytes/chars when auto-distilling from conversationId (800..8000).",
+        },
       },
     },
   },
   {
     name: "save_token_stats",
     description:
-      "Report real byte/token savings (`rawProcessed` vs `returnedToContext`), active `state` keys, persisted `kv_memory`, FTS5 sources, handoffs, and background jobs.",
+      "Xem thống kê tối ưu token: lượt gọi, bytes xử lý vs bytes trả về ngữ cảnh, % tiết kiệm, khóa `state`, `kv_memory`, nguồn FTS5, handoff và job nền.",
     inputSchema: {
       type: "object",
       properties: {},
@@ -1427,15 +1435,49 @@ function buildSandboxTools(baseCwd, mode, defaultTimeoutMs, byteTracker) {
 
 // ── Transcript Extractor for Zero-LLM Handoff ────────────────────────
 
+const NOISE_PATH_RE = /\/(?:\.system_generated|browser_sandbox|tempmediaStorage)\/|\.metadata\.json$/i;
+
+function clipInline(text, maxLen) {
+  const s = String(text || "").replace(/\s+/g, " ").trim();
+  if (!s || s.length <= maxLen) return s;
+  return `${s.slice(0, Math.max(0, maxLen - 1)).trimEnd()}…`;
+}
+
+function clipBlock(text, maxLen) {
+  const s = String(text || "").replace(/\r\n/g, "\n").trim();
+  if (!s || s.length <= maxLen) return s;
+  return `${s.slice(0, Math.max(0, maxLen - 14)).trimEnd()}\n…[trimmed]`;
+}
+
 function stripWrapperTags(text) {
-  return String(text)
-    .replace(/<voice_instructions>[\s\S]*?<\/voice_instructions>/gi, "")
-    .replace(/<talker_agent_context>[\s\S]*?<\/talker_agent_context>/gi, "")
-    .replace(/<ADDITIONAL_METADATA>[\s\S]*?<\/ADDITIONAL_METADATA>/gi, "")
-    .replace(/<USER_SETTINGS_CHANGE>[\s\S]*?<\/USER_SETTINGS_CHANGE>/gi, "")
-    .replace(/<\/?USER_REQUEST>/gi, "")
+  return String(text || "")
+    .replace(/<(voice_instructions|talker_agent_context|ADDITIONAL_METADATA|USER_SETTINGS_CHANGE|SYSTEM_MESSAGE)>[\s\S]*?<\/\1>/gi, " ")
+    .replace(/<(voice_instructions|talker_agent_context|ADDITIONAL_METADATA|USER_SETTINGS_CHANGE|SYSTEM_MESSAGE)>[\s\S]*?(?=\r?\n#|$)/gi, " ")
+    .replace(/<\/?USER_REQUEST>/gi, " ")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function cleanCheckpointSummary(raw) {
+  const cleaned = String(raw || "")
+    .replace(/<(voice_instructions|talker_agent_context|ADDITIONAL_METADATA|USER_SETTINGS_CHANGE|SYSTEM_MESSAGE)>[\s\S]*?<\/\1>/gi, " ")
+    .replace(/<(voice_instructions|talker_agent_context|ADDITIONAL_METADATA|USER_SETTINGS_CHANGE|SYSTEM_MESSAGE)>[\s\S]*?(?=\r?\n#|$)/gi, " ")
+    .replace(/<\/?USER_REQUEST>/gi, " ")
+    .replace(/^#\s*Resuming from a compaction\s*/i, "")
+    .replace(/^You are continuing work on the task described above[\s\S]*?This summary was generated at[^\n]*\n?/i, "")
+    .replace(/(?:^|\r?\n)#\s*User Requests[\s\S]*?(?=\r?\n##\s|$)/i, "")
+    .trim();
+
+  const picked = [];
+  for (const heading of ["## 1. Task Overview", "## 6. Active Context", "## 8. Next Steps"]) {
+    const idx = cleaned.indexOf(heading);
+    if (idx < 0) continue;
+    const after = cleaned.slice(idx);
+    const nextSec = after.slice(heading.length).search(/\r?\n##\s/);
+    const block = nextSec >= 0 ? after.slice(0, heading.length + nextSec) : after;
+    picked.push(clipBlock(block.trim(), 220));
+  }
+  return picked.length > 0 ? clipBlock(picked.join("\n"), 500) : clipBlock(cleaned, 480);
 }
 
 function extractVoiceUserUtterances(text) {
@@ -1453,53 +1495,211 @@ function extractVoiceUserUtterances(text) {
   return utterances;
 }
 
-async function extractTranscriptFacts(transcriptFile) {
-  const userPrompts = [];
-  const seenPrompts = new Set();
-  const touchedFiles = new Set();
-  const recentErrors = [];
+function findTranscriptInDir(convDir) {
+  const full = path.join(convDir, ".system_generated", "logs", "transcript_full.jsonl");
+  if (fsSync.existsSync(full)) return full;
+  const compact = path.join(convDir, ".system_generated", "logs", "transcript.jsonl");
+  if (fsSync.existsSync(compact)) return compact;
+  return "";
+}
 
-  const pushPrompt = (txt) => {
-    const val = String(txt || "").trim().slice(0, 180);
-    if (!val || seenPrompts.has(val)) return;
-    seenPrompts.add(val);
-    userPrompts.push(val);
-  };
+function resolveAntigravityConversation(targetArg) {
+  const root = ANTIGRAVITY_BRAIN_DIR;
+  if (!fsSync.existsSync(root)) {
+    throw new Error(`Antigravity brain directory not found: ${toPosix(root)}`);
+  }
+  const currentId = String(process.env.ANTIGRAVITY_CONVERSATION_ID || "").toLowerCase();
+  const entries = fsSync
+    .readdirSync(root, { withFileTypes: true })
+    .filter((d) => d.isDirectory() && d.name !== "tempmediaStorage")
+    .map((d) => {
+      const dirPath = path.join(root, d.name);
+      const transcriptPath = findTranscriptInDir(dirPath);
+      if (!transcriptPath) return null;
+      return { id: d.name, dirPath, transcriptPath, stat: fsSync.statSync(transcriptPath) };
+    })
+    .filter(Boolean);
 
-  let raw;
-  try {
-    raw = await fs.readFile(transcriptFile, "utf8");
-  } catch {
-    return { userPrompts: [], touchedFiles: [], recentErrors: [], loaded: false };
+  if (entries.length === 0) {
+    throw new Error(`No conversation transcripts found under ${toPosix(root)}`);
   }
 
-  const lines = raw.trim().split(/\r?\n/).filter(Boolean);
-  for (const ln of lines) {
+  const query = String(targetArg || "").trim();
+  if (!query || query.toLowerCase() === "latest") {
+    const filtered = entries
+      .filter((e) => !currentId || e.id.toLowerCase() !== currentId)
+      .sort((a, b) => b.stat.mtimeMs - a.stat.mtimeMs);
+    return filtered[0] || entries.sort((a, b) => b.stat.mtimeMs - a.stat.mtimeMs)[0];
+  }
+
+  const lower = query.toLowerCase();
+  const exact = entries.find((e) => e.id.toLowerCase() === lower);
+  if (exact) return exact;
+
+  if (lower.length < 6) {
+    throw new Error(`Conversation ID prefix "${query}" is too short (need >= 6 chars, full UUID, or "latest").`);
+  }
+  const matches = entries.filter((e) => e.id.toLowerCase().startsWith(lower));
+  if (matches.length === 1) return matches[0];
+  if (matches.length > 1) {
+    throw new Error(`Ambiguous conversation prefix "${query}": ${matches.map((m) => m.id).join(", ")}`);
+  }
+  throw new Error(`Conversation not found: "${query}"`);
+}
+
+function inferWorkspaceRoot(filePaths) {
+  const counts = new Map();
+  for (const fp of filePaths) {
+    if (/\/\.gemini\/antigravity\/brain\//i.test(fp)) continue;
+    const m =
+      fp.match(/^([A-Za-z]:\/(?:Users\/[^/]+\/\.gemini\/antigravity\/scratch\/[^/]+|[^/]+\/[^/]+))/i) ||
+      fp.match(/^(\/(?:Users|home)\/[^/]+\/[^/]+\/[^/]+)/);
+    if (!m) continue;
+    counts.set(m[1], (counts.get(m[1]) || 0) + 1);
+  }
+  let best = "";
+  let bestScore = 0;
+  for (const [dir, n] of counts.entries()) {
+    if (n > bestScore) {
+      best = dir;
+      bestScore = n;
+    }
+  }
+  return best;
+}
+
+function listConvArtifacts(convDir) {
+  if (!convDir || !fsSync.existsSync(convDir)) return [];
+  try {
+    return fsSync
+      .readdirSync(convDir, { withFileTypes: true })
+      .filter((e) => e.isFile() && /\.md$/i.test(e.name) && !/\.metadata\.json$/i.test(e.name))
+      .map((e) => e.name)
+      .slice(0, 12);
+  } catch {
+    return [];
+  }
+}
+
+async function extractTranscriptFacts(transcriptFile, convDir = "") {
+  const empty = {
+    loaded: false,
+    stepCount: 0,
+    userTurnCount: 0,
+    firstUserPrompt: "",
+    userPrompts: [],
+    assistantReplies: [],
+    lastPlan: "",
+    lastCheckpoint: "",
+    touchedFiles: [],
+    artifacts: [],
+    workspace: "",
+    recentErrors: [],
+  };
+  if (!transcriptFile || !fsSync.existsSync(transcriptFile)) return empty;
+
+  let firstUserPrompt = "";
+  const userPrompts = [];
+  const seenPrompts = new Set();
+  const touchedFiles = new Map();
+  const assistantReplies = [];
+  const recentErrors = [];
+  let lastPlan = "";
+  let lastCheckpoint = "";
+  let stepCount = 0;
+  let userTurnCount = 0;
+
+  const pushPrompt = (txt) => {
+    const val = clipInline(txt, 200);
+    if (!val || seenPrompts.has(val)) return;
+    seenPrompts.add(val);
+    if (!firstUserPrompt) firstUserPrompt = val;
+    userPrompts.push(val);
+    if (userPrompts.length > 7) userPrompts.shift();
+  };
+
+  const touchFile = (rawPath) => {
+    const p = toPosix(String(rawPath || "").trim());
+    if (!p || NOISE_PATH_RE.test(p)) return;
+    const prev = touchedFiles.get(p) || 0;
+    touchedFiles.delete(p);
+    touchedFiles.set(p, prev + 1);
+  };
+
+  const pushError = (txt) => {
+    const val = clipInline(txt, 180);
+    if (!val || recentErrors[recentErrors.length - 1] === val) return;
+    recentErrors.push(val);
+    if (recentErrors.length > 3) recentErrors.shift();
+  };
+
+  const rl = readline.createInterface({
+    input: fsSync.createReadStream(transcriptFile, { encoding: "utf8" }),
+    crlfDelay: Infinity,
+  });
+
+  for await (const ln of rl) {
+    if (!ln.trim()) continue;
     let o;
     try {
       o = JSON.parse(ln);
     } catch {
       continue;
     }
-    const content = typeof o.content === "string" ? o.content : JSON.stringify(o);
-    if (o.type === "USER_INPUT") {
-      for (const u of extractVoiceUserUtterances(content)) pushPrompt(u);
-      pushPrompt(stripWrapperTags(content));
-    } else if (o.type === "ERROR_MESSAGE") {
-      recentErrors.push(content.replace(/\s+/g, " ").slice(0, 180));
-    } else if (o.type === "GENERIC") {
+    stepCount += 1;
+    const type = String(o.type || "");
+    const content = typeof o.content === "string" ? o.content : "";
+
+    if (type === "USER_INPUT") {
+      userTurnCount += 1;
+      const rawInput = content || JSON.stringify(o);
+      for (const u of extractVoiceUserUtterances(rawInput)) pushPrompt(u);
+      pushPrompt(stripWrapperTags(rawInput));
+    } else if (type === "PLANNER_RESPONSE") {
+      if (content.trim().length > 20) {
+        assistantReplies.push(content.trim());
+        if (assistantReplies.length > 2) assistantReplies.shift();
+      }
+      if (Array.isArray(o.tool_calls)) {
+        for (const tc of o.tool_calls) {
+          const name = String(tc?.name || "");
+          const tcArgs = tc?.args || tc?.arguments || {};
+          if (name === "edit_file" || name === "write_file") {
+            touchFile(tcArgs.Path || tcArgs.path || "");
+          } else if (name === "exit_plan_mode" && typeof tcArgs.plan === "string" && tcArgs.plan.trim()) {
+            lastPlan = clipBlock(tcArgs.plan, 500);
+          }
+        }
+      }
+    } else if (type === "CHECKPOINT" && content.trim()) {
+      lastCheckpoint = cleanCheckpointSummary(content);
+    } else if (type === "ERROR_MESSAGE") {
+      pushError(content || JSON.stringify(o));
+    } else if (type === "GENERIC" && content) {
       if (/Created file|Made \d+ replacement|write_file|edit_file/i.test(content)) {
         const matches = content.match(/(?:[A-Za-z]:[\\/]|\/(?:Users|home|opt|etc|tmp|var)\/)[^\s"'`<>]+/g) || [];
-        for (const m of matches) touchedFiles.add(toPosix(m));
+        for (const m of matches) touchFile(m);
+      }
+      if (/Command exited with code [1-9]|Encountered error in/i.test(content)) {
+        pushError(content);
       }
     }
   }
 
+  const orderedFiles = [...touchedFiles.keys()].reverse().slice(0, 12);
   return {
     loaded: true,
-    userPrompts: userPrompts.slice(-5),
-    touchedFiles: [...touchedFiles].slice(-12),
-    recentErrors: recentErrors.slice(-3),
+    stepCount,
+    userTurnCount,
+    firstUserPrompt,
+    userPrompts,
+    assistantReplies,
+    lastPlan,
+    lastCheckpoint,
+    touchedFiles: orderedFiles,
+    artifacts: listConvArtifacts(convDir),
+    workspace: inferWorkspaceRoot([...touchedFiles.keys()]),
+    recentErrors,
   };
 }
 
@@ -1696,42 +1896,118 @@ function executeSearch(args = {}) {
   return { isError: false, text: out };
 }
 
+function stripSourceSigHeader(text) {
+  return String(text || "").replace(/^<!--\s*source-sig:[^>]*-->\r?\n/, "");
+}
+
 async function executeHandoff(args = {}) {
   metrics.calls.handoff += 1;
-  const title = typeof args.title === "string" && args.title.trim() ? args.title.trim() : "";
-  if (!title) {
-    return { isError: true, text: "Invalid arguments: 'title' is required." };
+  const rawTitle = typeof args.title === "string" ? args.title.trim() : "";
+  const convArg = typeof args.conversationId === "string" ? args.conversationId.trim() : "";
+  const explicitTranscript = typeof args.transcriptPath === "string" ? args.transcriptPath.trim() : "";
+
+  if (!rawTitle && !convArg && !explicitTranscript) {
+    return { isError: true, text: "Invalid arguments: provide 'title', 'conversationId', or 'transcriptPath'." };
   }
 
-  const maxChars = clampNumber(args.maxChars, 800, 6000, 2400);
-  const project = typeof args.project === "string" ? args.project.trim() : "";
-  const convId = typeof args.conversationId === "string" ? args.conversationId.trim() : "";
-  const explicitTranscript = typeof args.transcriptPath === "string" ? args.transcriptPath.trim() : "";
+  const isPureAuto =
+    Boolean(convArg) &&
+    !explicitTranscript &&
+    !args.goal &&
+    !(Array.isArray(args.decisions) && args.decisions.length > 0) &&
+    !(Array.isArray(args.nextSteps) && args.nextSteps.length > 0) &&
+    !(Array.isArray(args.openRisks) && args.openRisks.length > 0) &&
+    !(Array.isArray(args.saveStateKeys) && args.saveStateKeys.length > 0);
+  const maxChars = clampNumber(args.maxChars, 800, 8000, isPureAuto ? 3800 : 2400);
+  const projectArg = typeof args.project === "string" ? args.project.trim() : "";
+
+  let resolvedConv = null;
+  let resolvedConvId = convArg;
+  let transcriptFile = explicitTranscript;
+  let convDir = "";
+
+  if (!transcriptFile && convArg) {
+    try {
+      resolvedConv = resolveAntigravityConversation(convArg);
+      resolvedConvId = resolvedConv.id;
+      transcriptFile = resolvedConv.transcriptPath;
+      convDir = resolvedConv.dirPath;
+    } catch (err) {
+      return { isError: true, text: err?.message || String(err) };
+    }
+  } else if (transcriptFile && /[\\/]\.system_generated[\\/]logs[\\/]/i.test(transcriptFile)) {
+    convDir = path.dirname(path.dirname(path.dirname(transcriptFile)));
+  }
+
+  const sourceSig = resolvedConv
+    ? `<!-- source-sig:${Math.trunc(resolvedConv.stat.mtimeMs)}:${resolvedConv.stat.size}:${maxChars} -->`
+    : "";
+
+  const scriptPath = toPosix(
+    path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1")), "../scripts/handoff-new-chat.mjs")
+  );
+  const nodeCmd = process.execPath.includes(" ") ? `"${process.execPath}"` : process.execPath;
+
+  if (isPureAuto && args.force !== true && sourceSig) {
+    const cachedRow = db
+      .prepare("SELECT * FROM handoffs WHERE conversation_id = ? ORDER BY created_at DESC LIMIT 1")
+      .get(resolvedConvId);
+    if (cachedRow && fsSync.existsSync(cachedRow.file_path)) {
+      try {
+        const diskText = await fs.readFile(cachedRow.file_path, "utf8");
+        const firstLine = diskText.split(/\r?\n/, 1)[0].trim();
+        if (firstLine === sourceSig) {
+          const cleanMd = stripSourceSigHeader(diskText).trimEnd();
+          const nextChatCommand = `${nodeCmd} "${scriptPath}" --handoff "${cachedRow.file_path}" --title "${cachedRow.title.replace(/"/g, '\\"')}"`;
+          const out = JSON.stringify(
+            {
+              handoffId: cachedRow.id,
+              conversationId: resolvedConvId,
+              filePath: cachedRow.file_path,
+              bytes: cachedRow.bytes,
+              estTokens: Math.round(cachedRow.bytes / 4),
+              savedMemoryKeys: [],
+              reusedCache: true,
+              summaryMd: cleanMd,
+              nextChatCommand,
+            },
+            null,
+            2
+          );
+          metrics.returnedBytes += utf8Bytes(out);
+          return { isError: false, text: out };
+        }
+      } catch {
+        // Fall through and rebuild handoff if cached file read fails.
+      }
+    }
+  }
 
   const savedMemoryKeys = [];
   if (Array.isArray(args.saveStateKeys)) {
     for (const k of args.saveStateKeys) {
       const key = String(k);
       if (Object.prototype.hasOwnProperty.call(sessionState, key)) {
-        saveMemory(key, sessionState[key], { project });
+        saveMemory(key, sessionState[key], { project: projectArg });
         savedMemoryKeys.push(key);
       }
     }
   }
 
-  let transcriptFile = explicitTranscript;
-  if (!transcriptFile && convId) {
-    transcriptFile = path.join(ANTIGRAVITY_BRAIN_DIR, convId, ".system_generated", "logs", "transcript_full.jsonl");
-  }
   const extracted = transcriptFile
-    ? await extractTranscriptFacts(transcriptFile)
-    : { userPrompts: [], touchedFiles: [], recentErrors: [], loaded: false };
+    ? await extractTranscriptFacts(transcriptFile, convDir)
+    : { loaded: false, userPrompts: [], assistantReplies: [], touchedFiles: [], artifacts: [], recentErrors: [], workspace: "", firstUserPrompt: "", lastPlan: "", lastCheckpoint: "", stepCount: 0, userTurnCount: 0 };
+
+  const title =
+    rawTitle ||
+    clipInline(extracted.firstUserPrompt || `Session ${resolvedConvId ? resolvedConvId.slice(0, 8) : "snapshot"}`, 72);
+  const project = projectArg || extracted.workspace || "";
 
   const lines = [
     `# Handoff: ${title}`,
-    `- Created: ${new Date().toISOString()}`,
+    `- Created: ${new Date().toISOString()}${extracted.stepCount ? ` | Steps: ${extracted.stepCount} | UserTurns: ${extracted.userTurnCount}` : ""}`,
     ...(project ? [`- Project: ${project}`] : []),
-    ...(convId ? [`- Source Conversation: ${convId}`] : []),
+    ...(resolvedConvId ? [`- Source Conversation: ${resolvedConvId}`] : []),
     ...(args.goal ? ["", "## Goal", String(args.goal).trim()] : []),
   ];
 
@@ -1751,12 +2027,29 @@ async function executeHandoff(args = {}) {
     for (const k of savedMemoryKeys) lines.push(`- \`${k}\``);
   }
   if (extracted.userPrompts.length > 0) {
+    const tailPrompts = extracted.firstUserPrompt
+      ? extracted.userPrompts.filter((p) => p !== extracted.firstUserPrompt).slice(-5)
+      : extracted.userPrompts.slice(-5);
     lines.push("", "## Recent User Requests");
-    for (const p of extracted.userPrompts) lines.push(`- ${p}`);
+    if (extracted.firstUserPrompt) lines.push(`- [Start] ${extracted.firstUserPrompt}`);
+    for (const p of tailPrompts) lines.push(`- ${p}`);
+  }
+  if (extracted.assistantReplies.length > 0) {
+    const latestReply = extracted.assistantReplies[extracted.assistantReplies.length - 1];
+    const replyBudget = clampNumber(Math.floor(maxChars * 0.36), 450, 1400, 1100);
+    lines.push("", "## Latest Conclusions & Status", clipBlock(latestReply, replyBudget));
+  }
+  if (extracted.lastCheckpoint || extracted.lastPlan) {
+    const heading = extracted.lastCheckpoint ? "## Latest Checkpoint" : "## Latest Plan";
+    lines.push("", heading, clipBlock(extracted.lastCheckpoint || extracted.lastPlan, 480));
   }
   if (extracted.touchedFiles.length > 0) {
     lines.push("", "## Touched Files");
     for (const f of extracted.touchedFiles) lines.push(`- \`${f}\``);
+  }
+  if (extracted.artifacts.length > 0) {
+    lines.push("", "## Artifacts");
+    for (const a of extracted.artifacts) lines.push(`- \`${a}\``);
   }
   if (extracted.recentErrors.length > 0) {
     lines.push("", "## Recent Errors");
@@ -1764,41 +2057,40 @@ async function executeHandoff(args = {}) {
   }
 
   let summaryMd = lines.join("\n").trim();
-  if (summaryMd.length > maxChars) {
-    summaryMd = capBytes(summaryMd, Math.max(400, maxChars - 32)).text + "\n\n[handoff trimmed]";
+  if (utf8Bytes(summaryMd) > maxChars) {
+    summaryMd = capBytes(summaryMd, Math.max(400, maxChars - 32)).text.trimEnd() + "\n\n[handoff trimmed]";
   }
 
-  const slug = title
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-|-$/g, "")
-    .slice(0, 32) || "session";
+  const slug =
+    title
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-|-$/g, "")
+      .slice(0, 32) || "session";
   const handoffId = `${Date.now().toString(36)}-${slug}`;
   const filePath = toPosix(path.join(HANDOFF_DIR, `${handoffId}.md`));
   await fs.mkdir(HANDOFF_DIR, { recursive: true });
-  await fs.writeFile(filePath, summaryMd + "\n", "utf8");
+  await fs.writeFile(filePath, `${sourceSig ? `${sourceSig}\n` : ""}${summaryMd}\n`, "utf8");
 
   const bytes = utf8Bytes(summaryMd);
   db.prepare(
     `INSERT INTO handoffs(id, title, project, conversation_id, file_path, summary_md, bytes, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run(handoffId, title, project, convId, filePath, summaryMd, bytes, Date.now());
+  ).run(handoffId, title, project, resolvedConvId, filePath, summaryMd, bytes, Date.now());
 
   indexIntoStore(`handoff:${handoffId}`, summaryMd);
 
-  const scriptPath = toPosix(
-    path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1")), "../scripts/handoff-new-chat.mjs")
-  );
-  const nodeCmd = process.execPath.includes(" ") ? `"${process.execPath}"` : process.execPath;
   const nextChatCommand = `${nodeCmd} "${scriptPath}" --handoff "${filePath}" --title "${title.replace(/"/g, '\\"')}"`;
 
   const out = JSON.stringify(
     {
       handoffId,
+      conversationId: resolvedConvId,
       filePath,
       bytes,
       estTokens: Math.round(bytes / 4),
       savedMemoryKeys,
+      reusedCache: false,
       summaryMd,
       nextChatCommand,
     },
@@ -1809,15 +2101,71 @@ async function executeHandoff(args = {}) {
   return { isError: false, text: out };
 }
 
-function executeResume(args = {}) {
+async function executeResume(args = {}) {
   metrics.calls.resume += 1;
+  const convArg = typeof args.conversationId === "string" ? args.conversationId.trim() : "";
+
+  if (convArg) {
+    let resolved;
+    try {
+      resolved = resolveAntigravityConversation(convArg);
+    } catch (err) {
+      return { isError: true, text: err?.message || String(err) };
+    }
+
+    const handoffRes = await executeHandoff({
+      conversationId: resolved.id,
+      maxChars: typeof args.maxChars === "number" ? args.maxChars : 3800,
+    });
+    if (handoffRes.isError) return handoffRes;
+
+    const handoffData = JSON.parse(handoffRes.text);
+    const row = db.prepare("SELECT * FROM handoffs WHERE id = ?").get(handoffData.handoffId);
+    let summaryFromFile = handoffData.summaryMd;
+    if (handoffData.filePath && fsSync.existsSync(handoffData.filePath)) {
+      try {
+        summaryFromFile = stripSourceSigHeader(await fs.readFile(handoffData.filePath, "utf8")).trimEnd();
+      } catch {
+        // Fallback to handoffData.summaryMd
+      }
+    }
+
+    const memoryKeys = listMemory((row && row.project) || undefined);
+    const recentIndexedSources = db
+      .prepare("SELECT label, bytes_total AS bytes, chunk_count AS chunks FROM sources ORDER BY id DESC LIMIT 10")
+      .all();
+
+    const out = JSON.stringify(
+      {
+        layer: 2,
+        autoGenerated: !handoffData.reusedCache,
+        reusedCache: Boolean(handoffData.reusedCache),
+        handoff: {
+          id: handoffData.handoffId,
+          title: row ? row.title : "",
+          project: row ? row.project : "",
+          conversationId: resolved.id,
+          filePath: handoffData.filePath,
+          createdAt: row ? row.created_at : Date.now(),
+          summaryMd: summaryFromFile,
+        },
+        memoryKeys,
+        recentIndexedSources,
+      },
+      null,
+      2
+    );
+    metrics.returnedBytes += utf8Bytes(out);
+    return { isError: false, text: out };
+  }
+
   const id = typeof args.handoffId === "string" ? args.handoffId.trim() : "";
 
   if (!id) {
     // Layer 1: compact index list
     const list = db
       .prepare(
-        "SELECT id, title, project, bytes, created_at AS createdAt FROM handoffs ORDER BY created_at DESC LIMIT 10"
+        "SELECT id, title, project, conversation_id AS conversationId, bytes, created_at AS createdAt FROM handoffs ORDER BY created_at DESC LIMIT 10"
       )
       .all();
     const out = JSON.stringify({ layer: 1, count: list.length, handoffs: list }, null, 2);
@@ -1835,6 +2183,15 @@ function executeResume(args = {}) {
     return { isError: true, text: `Handoff not found: "${id}"` };
   }
 
+  let summaryFromFile = row.summary_md;
+  if (row.file_path && fsSync.existsSync(row.file_path)) {
+    try {
+      summaryFromFile = stripSourceSigHeader(await fs.readFile(row.file_path, "utf8")).trimEnd();
+    } catch {
+      // Fallback to DB summary_md
+    }
+  }
+
   const memoryKeys = listMemory(row.project || undefined);
   const recentIndexedSources = db
     .prepare("SELECT label, bytes_total AS bytes, chunk_count AS chunks FROM sources ORDER BY id DESC LIMIT 10")
@@ -1847,9 +2204,10 @@ function executeResume(args = {}) {
         id: row.id,
         title: row.title,
         project: row.project,
+        conversationId: row.conversation_id,
         filePath: row.file_path,
         createdAt: row.created_at,
-        summaryMd: row.summary_md,
+        summaryMd: summaryFromFile,
       },
       memoryKeys,
       recentIndexedSources,
@@ -1958,7 +2316,7 @@ async function handleRequest(req) {
       else if (toolName === "save_token_poll") outcome = await executePoll(args);
       else if (toolName === "save_token_search") outcome = executeSearch(args);
       else if (toolName === "save_token_handoff") outcome = await executeHandoff(args);
-      else if (toolName === "save_token_resume") outcome = executeResume(args);
+      else if (toolName === "save_token_resume") outcome = await executeResume(args);
       else if (toolName === "save_token_stats") outcome = executeStats();
       else outcome = { isError: true, text: `Unknown tool: ${toolName}` };
 
