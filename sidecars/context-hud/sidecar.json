@@ -1,0 +1,21 @@
+{
+  "command": "node",
+  "args": ["--no-warnings=ExperimentalWarning", "main.mjs"],
+  "restart_policy": "always",
+  "display_name": "Save Token HUD",
+  "description": "Giám sát Context Window, Cache Hit, lượt gọi gần nhất và tạo Handoff 0-LLM thời gian thực.",
+  "has_web_ui": true,
+  "agent_permissions": {
+    "allows_user_interactions": true
+  },
+  "ui_config": {
+    "display_name": "Save Token HUD",
+    "views": [
+      {
+        "path": "/",
+        "entrypoint": "SIDECAR_UI_ENTRYPOINT_AUX_PANE",
+        "title": "Save Token HUD"
+      }
+    ]
+  }
+}

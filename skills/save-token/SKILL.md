@@ -7,20 +7,20 @@ description: Universal token-saving toolkit across AI coding and research agents
 
 | Tool | Purpose |
 | :--- | :--- |
-| `save_token_exec` | Persistent JS REPL (`state`, ``await $`...`.compact()``, `tools.*`) with durable SQLite FTS5+Trigram indexing & `intent` BM25 filtering. |
+| `save_token_exec` | Persistent JS REPL (`state`, ``await $`...`.compact()``, `tools.outline`/`readSymbol`, `tools.*`) with durable SQLite FTS5+Trigram indexing & `intent` BM25 filtering. |
 | `save_token_poll` | Check, wait for, or kill background jobs from `tools.spawnBg(cmd)` with optional `compact` & `intent`. |
 | `save_token_search` | Query indexed sources across **current and prior sessions** (`chunks` Porter BM25 + `chunks_tri` Trigram). |
-| `save_token_handoff` | Zero-LLM handoff builder: extracts prompts, conclusions, plan/checkpoint, touched files & errors from transcript (`conversationId` or `transcriptPath`), saves `state` keys into `kv_memory`, and writes a compact `.md` snapshot. |
+| `save_token_handoff` | Zero-LLM handoff builder: extracts prompts, conclusions, plan/checkpoint, touched files & errors from transcript (`conversationId` or `transcriptPath`), auto-infers `branch`/`tags` with 0 LLM tokens, saves `state` keys into `kv_memory`, and writes a compact `.md` snapshot. |
 | `save_token_resume` | 3-layer resume: `()` lists recent handoffs; `({ handoffId: "latest" })` loads summary; `({ conversationId: "<id|prefix|latest>" })` auto-runs 0-LLM `save_token_handoff` on that chat's transcript (cached) and returns its `.md` summary. |
 | `save_token_stats` | Reports raw bytes processed vs returned to context, `%` saved, `state`, `kv_memory`, FTS5 sources, and jobs. |
 
 ## 1. Universal Data, Code & CLI Rules
 
-- Use `save_token_exec` whenever inspecting **3+ files**, filtering logs/JSON/CSV, fetching/cleaning static web pages (`tools.fetchText(url)`), or running external CLIs via ``await $`...`.compact()``.
+- Use `save_token_exec` whenever inspecting **3+ files**, large codebases (`tools.repoMap(target, { focusFiles })` for Personalized PageRank map, `tools.outline(target)` + `tools.readSymbol(file, name)`, `tools.stripComments(code, file)`), filtering logs/JSON/CSV (`tools.compactData(raw)`), fetching/cleaning static web pages (`tools.fetchText(url)`), or running external CLIs via ``await $`...`.compact()``.
 - Keep bulky datasets in `state.<key>` (same session) or `tools.saveMemory(key, val)` (cross-session SQLite `kv_memory`), returning only counts/samples to chat.
 - Pass `intent` on `save_token_exec` when output may be large so SQLite FTS5 returns only matching chunks instead of dumping raw text.
 - Keep `mode: "readonly"` by default; verify edits with `dryRun: true` before `mode: "write"`.
-- For **1–2 small files**, use native file read/edit tools directly.
+- For **1–2 small files**, use native file read/edit tools directly (`PreToolUse` hook enforces Read-Dedup on unchanged slices, auto-clamps >35KB raw reads, compacts noisy CLI commands via 8-stage filter rules, and writes full failure logs to `tee/` on non-zero exits).
 
 ## 2. External Tools -> CLI-First
 
@@ -35,4 +35,4 @@ Prefer local CLIs inside `save_token_exec` over verbose external MCP schemas or 
 When context grows long (~60–80k+ tokens) or you want to switch to a fresh chat without losing state:
 1. Call `save_token_handoff({ title, goal, decisions, nextSteps, saveStateKeys, conversationId?, transcriptPath? })` (0 LLM tokens).
 2. On Antigravity, optionally run `scripts/handoff-new-chat.mjs --handoff "<filePath>" --title "<title>"` via shell to spawn the next conversation automatically; on other harnesses, start a fresh session and pass the `handoffId` or `.md` summary.
-3. In the new session, call `save_token_resume({ handoffId: "latest" })` (or `save_token_resume({ conversationId: "<id|prefix|latest>" })` if no handoff was saved yet — it auto-distills the old transcript into `.md` and reads it back), and use `save_token_search` / `tools.loadMemory` on demand.
+3. In the new session, call `save_token_resume({ handoffId: "latest" })` (or `save_token_resume({ conversationId: "<id|prefix|latest>" })` if no handoff was saved yet — it auto-distills the old transcript into `.md` and reads it back), and use `save_token_search` / `tools.loadMemory` on demand. On Antigravity, the `Stop` hook (`save-token-idle-snapshot`) uses anchored delta distillation (0-LLM) when `fullyIdle: true`, `SessionStart` auto-loads the fresh snapshot, the HUD tracks KV-cache warmth + weighted 5h/7d burn (`GET /api/burn`), and `/save-token-terse` enables opt-in ultra-concise replies.

@@ -1,0 +1,14 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "save-token": {
+      "type": "local",
+      "command": [
+        "node",
+        "--no-warnings=ExperimentalWarning",
+        "/ABSOLUTE/PATH/TO/.save-token/server/save-token-mcp.mjs"
+      ],
+      "enabled": true
+    }
+  }
+}

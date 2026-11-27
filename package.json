@@ -1,7 +1,7 @@
 {
   "name": "save-token-mcp",
-  "version": "1.2.0",
-  "description": "Zero-dependency universal token-saving MCP server, CLI-first playbook, browser tight-scoping guide, and 0-LLM session handoff for Antigravity, Claude Code, Codex, DeepSeek Harness, Cursor, and Gemini CLI.",
+  "version": "1.3.0",
+  "description": "Zero-dependency universal token-saving toolkit across 7 coding/research harnesses: JS sandbox, RTK+TOON+RepoMap compression, Reversible CCR, cross-platform hooks, 0-LLM anchored handoff/resume, and Context HUD.",
   "type": "module",
   "author": "Rikku_desu~",
   "homepage": "https://github.com/rikkurea-boop/save-token#readme",
@@ -20,9 +20,10 @@
   "scripts": {
     "start": "node --no-warnings=ExperimentalWarning server/save-token-mcp.mjs",
     "install:auto": "node install.mjs --target auto",
-    "test": "node server/test-save-token.mjs && node server/test-installer.mjs",
-    "test:mcp": "node server/test-save-token.mjs",
-    "test:installer": "node server/test-installer.mjs"
+    "test": "node --no-warnings=ExperimentalWarning server/test-save-token.mjs && node --no-warnings=ExperimentalWarning server/test-installer.mjs && node --no-warnings=ExperimentalWarning sidecars/context-hud/test-hud.mjs",
+    "test:mcp": "node --no-warnings=ExperimentalWarning server/test-save-token.mjs",
+    "test:installer": "node --no-warnings=ExperimentalWarning server/test-installer.mjs",
+    "test:hud": "node --no-warnings=ExperimentalWarning sidecars/context-hud/test-hud.mjs"
   },
   "keywords": [
     "mcp",
@@ -34,6 +35,10 @@
     "codex",
     "deepseek-harness",
     "cursor",
-    "gemini-cli"
+    "gemini-cli",
+    "opencode",
+    "toon",
+    "rtk",
+    "hooks"
   ]
 }

@@ -37,13 +37,24 @@ async function main() {
   try {
     // Seed existing user configurations to ensure zero clobbering
     await fs.mkdir(path.join(fakeHome, ".gemini", "antigravity"), { recursive: true });
+    await fs.mkdir(path.join(fakeHome, ".claude"), { recursive: true });
     await fs.mkdir(path.join(fakeHome, ".codex"), { recursive: true });
     await fs.mkdir(path.join(fakeHome, ".cursor"), { recursive: true });
     await fs.mkdir(path.join(fakeHome, ".dsh"), { recursive: true });
+    await fs.mkdir(path.join(fakeHome, ".config", "opencode"), { recursive: true });
 
     await fs.writeFile(
       path.join(fakeHome, ".claude.json"),
       JSON.stringify({ theme: "dark", mcpServers: { existingServer: { command: "echo" } } }, null, 2),
+      "utf8"
+    );
+    await fs.writeFile(
+      path.join(fakeHome, ".claude", "settings.json"),
+      JSON.stringify({
+        hooks: {
+          PreToolUse: [{ matcher: "Write", hooks: [{ type: "command", command: "echo user-hook" }] }],
+        },
+      }, null, 2),
       "utf8"
     );
     await fs.writeFile(
@@ -61,34 +72,45 @@ async function main() {
       JSON.stringify({ general: { vimMode: true }, mcpServers: { existingGemini: { command: "node" } } }, null, 2),
       "utf8"
     );
+    await fs.writeFile(
+      path.join(fakeHome, ".config", "opencode", "opencode.json"),
+      JSON.stringify({ mcp: { existingOpenCode: { type: "local", command: ["echo"] } } }, null, 2),
+      "utf8"
+    );
 
     // 1. Dry-run should not create core files
     const dryRes = await runInstaller(["--target", "all", "--dry-run"], fakeHome);
     assert.match(dryRes.stdout, /DRY RUN/);
     assert.equal(await exists(path.join(fakeHome, ".save-token")), false);
 
-    // 2. Full install across all 6 targets
+    // 2. Full install across all 7 targets
     const allRes = await runInstaller(["--target", "all"], fakeHome);
-    assert.match(allRes.stdout, /antigravity, claude, codex, dsh, cursor, gemini-cli/);
+    assert.match(allRes.stdout, /antigravity, claude, codex, dsh, cursor, gemini-cli, opencode/);
 
     // Verify Antigravity
     const agyMcp = JSON.parse(
       await fs.readFile(path.join(fakeHome, ".gemini", "config", "plugins", "save-token", "mcp_config.json"), "utf8")
     );
     assert.ok(agyMcp.mcpServers["save-token"].args[1].endsWith("/save-token-mcp.mjs"));
+    assert.equal(await exists(path.join(fakeHome, ".gemini", "config", "plugins", "save-token", "hooks.json")), true);
 
-    // Verify Claude Code preserves existing keys
+    // Verify Claude Code preserves existing keys, installs 3 skills & hooks
     const claudeCfg = JSON.parse(await fs.readFile(path.join(fakeHome, ".claude.json"), "utf8"));
     assert.equal(claudeCfg.theme, "dark");
     assert.ok(claudeCfg.mcpServers.existingServer);
     assert.equal(claudeCfg.mcpServers["save-token"].type, "stdio");
-    assert.equal(await exists(path.join(fakeHome, ".claude", "skills", "save-token", "SKILL.md")), true);
+    for (const sk of ["save-token", "save-token-terse", "lean-review"]) {
+      assert.equal(await exists(path.join(fakeHome, ".claude", "skills", sk, "SKILL.md")), true);
+      assert.equal(await exists(path.join(fakeHome, ".agents", "skills", sk, "SKILL.md")), true);
+    }
+    const claudeSettings = JSON.parse(await fs.readFile(path.join(fakeHome, ".claude", "settings.json"), "utf8"));
+    assert.equal(claudeSettings.hooks.PreToolUse.length, 2);
+    assert.equal(claudeSettings.hooks.SessionStart.length, 1);
 
     // Verify Codex preserves existing config & injects block once
     const codexToml = await fs.readFile(path.join(fakeHome, ".codex", "config.toml"), "utf8");
     assert.match(codexToml, /\[mcp_servers\.user_tool\]/);
     assert.match(codexToml, /\[mcp_servers\.save-token\]/);
-    assert.equal(await exists(path.join(fakeHome, ".agents", "skills", "save-token", "SKILL.md")), true);
 
     // Verify DeepSeek Harness (dsh) adapter & rule copy
     const dshYml = await fs.readFile(path.join(fakeHome, ".dsh", "save-token.cordis.yml"), "utf8");
@@ -96,26 +118,40 @@ async function main() {
     assert.match(dshYml, /\.save-token\/server\/save-token-mcp\.mjs/);
     assert.equal(await exists(path.join(fakeHome, ".dsh", "save-token.AGENTS.md")), true);
 
-    // Verify Cursor & Gemini CLI preserve existing entries
+    // Verify Cursor MCP + hooks & Gemini CLI MCP + hooks preserve existing entries
     const cursorCfg = JSON.parse(await fs.readFile(path.join(fakeHome, ".cursor", "mcp.json"), "utf8"));
     assert.ok(cursorCfg.mcpServers.keepMe);
     assert.ok(cursorCfg.mcpServers["save-token"]);
+    const cursorHooks = JSON.parse(await fs.readFile(path.join(fakeHome, ".cursor", "hooks.json"), "utf8"));
+    assert.equal(cursorHooks.hooks.preToolUse.length, 1);
 
     const geminiCfg = JSON.parse(await fs.readFile(path.join(fakeHome, ".gemini", "settings.json"), "utf8"));
     assert.equal(geminiCfg.general.vimMode, true);
     assert.ok(geminiCfg.mcpServers.existingGemini);
     assert.ok(geminiCfg.mcpServers["save-token"]);
+    assert.equal(geminiCfg.hooks.BeforeTool.length, 1);
+    assert.equal(geminiCfg.hooks.SessionStart.length, 1);
 
-    // 3. Idempotency: running twice must not duplicate Codex TOML block
+    // Verify OpenCode preserves existing MCP and adds save-token local array command
+    const ocCfg = JSON.parse(await fs.readFile(path.join(fakeHome, ".config", "opencode", "opencode.json"), "utf8"));
+    assert.ok(ocCfg.mcp.existingOpenCode);
+    assert.equal(ocCfg.mcp["save-token"].type, "local");
+    assert.equal(ocCfg.mcp["save-token"].enabled, true);
+
+    // 3. Idempotency: running twice must not duplicate Codex TOML block or hooks
     await runInstaller(["--target", "all"], fakeHome);
     const codexToml2 = await fs.readFile(path.join(fakeHome, ".codex", "config.toml"), "utf8");
     assert.equal(codexToml2.match(/# BEGIN save-token/g)?.length, 1);
+    const claudeSettings2 = JSON.parse(await fs.readFile(path.join(fakeHome, ".claude", "settings.json"), "utf8"));
+    assert.equal(claudeSettings2.hooks.PreToolUse.length, 2);
 
-    // 4. Uninstall cleanly removes save-token while preserving user settings
+    // 4. Uninstall cleanly removes save-token MCP, 3 skills & save-token hooks while preserving user hooks/settings
     await runInstaller(["--uninstall", "--target", "all"], fakeHome);
     assert.equal(await exists(path.join(fakeHome, ".save-token")), false);
-    assert.equal(await exists(path.join(fakeHome, ".claude", "skills", "save-token")), false);
-    assert.equal(await exists(path.join(fakeHome, ".agents", "skills", "save-token")), false);
+    for (const sk of ["save-token", "save-token-terse", "lean-review"]) {
+      assert.equal(await exists(path.join(fakeHome, ".claude", "skills", sk)), false);
+      assert.equal(await exists(path.join(fakeHome, ".agents", "skills", sk)), false);
+    }
     assert.equal(await exists(path.join(fakeHome, ".dsh", "save-token.cordis.yml")), false);
     assert.equal(await exists(path.join(fakeHome, ".gemini", "config", "plugins", "save-token")), false);
 
@@ -123,11 +159,24 @@ async function main() {
     assert.ok(claudeAfter.mcpServers.existingServer);
     assert.equal(claudeAfter.mcpServers["save-token"], undefined);
 
+    const claudeSettingsAfter = JSON.parse(await fs.readFile(path.join(fakeHome, ".claude", "settings.json"), "utf8"));
+    assert.equal(claudeSettingsAfter.hooks.PreToolUse.length, 1);
+    assert.equal(claudeSettingsAfter.hooks.PreToolUse[0].matcher, "Write");
+    assert.equal(claudeSettingsAfter.hooks.SessionStart, undefined);
+
+    const ocAfter = JSON.parse(await fs.readFile(path.join(fakeHome, ".config", "opencode", "opencode.json"), "utf8"));
+    assert.ok(ocAfter.mcp.existingOpenCode);
+    assert.equal(ocAfter.mcp["save-token"], undefined);
+
     const codexAfter = await fs.readFile(path.join(fakeHome, ".codex", "config.toml"), "utf8");
     assert.match(codexAfter, /\[mcp_servers\.user_tool\]/);
     assert.doesNotMatch(codexAfter, /save-token/);
 
-    // 5. Auto fallback on empty home installs shared core + ~/.agents/skills/save-token
+    // 5. Auto fallback + --skip-hooks check on empty home
+    await runInstaller(["--target", "claude", "--skip-hooks"], fakeEmptyHome);
+    const emptyClaudeSettings = await exists(path.join(fakeEmptyHome, ".claude", "settings.json"));
+    assert.equal(emptyClaudeSettings, false);
+
     await runInstaller(["--target", "auto"], fakeEmptyHome);
     assert.equal(await exists(path.join(fakeEmptyHome, ".save-token", "server", "save-token-mcp.mjs")), true);
     assert.equal(await exists(path.join(fakeEmptyHome, ".agents", "skills", "save-token", "SKILL.md")), true);
@@ -146,7 +195,7 @@ async function main() {
     });
     assert.match(skipFlag.stdout, /skipped \(--skip-browser\)|already installed/);
 
-    console.log("ALL INSTALLER TESTS PASSED (6 PLATFORMS + IDEMPOTENCY + UNINSTALL + AUTO + DEFAULT BROWSER)");
+    console.log("ALL INSTALLER TESTS PASSED (7 PLATFORMS + HOOKS + 3 SKILLS + IDEMPOTENCY + UNINSTALL + AUTO + DEFAULT BROWSER)");
   } finally {
     await fs.rm(fakeHome, { recursive: true, force: true });
     await fs.rm(fakeEmptyHome, { recursive: true, force: true });

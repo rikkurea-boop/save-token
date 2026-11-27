@@ -8,6 +8,11 @@ import { exec, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { StringDecoder } from "node:string_decoder";
 import { DatabaseSync } from "node:sqlite";
+import { inferBranch, inferTags, normalizeBranch, normalizeTags } from "../scripts/context-meta.mjs";
+import { compactOutput, compactStructuredData, encodeToon, stripAnsi, stripSourceComments } from "../scripts/compact-engine.mjs";
+import { extractOutline, extractSymbolSlice } from "../scripts/code-outline.mjs";
+import { buildRepoMap } from "../scripts/repo-map.mjs";
+import { resolveDataDir, resolveDbPath } from "../scripts/storage-paths.mjs";
 
 const execAsync = promisify(exec);
 
@@ -21,7 +26,7 @@ const DEFAULT_IGNORES = new Set([
   ".venv",
 ]);
 
-const SERVER_INFO = { name: "save-token", version: "1.1.0" };
+const SERVER_INFO = { name: "save-token", version: "1.3.0" };
 const DEFAULT_CHUNK_BYTES = 1500;
 const MAX_BG_STREAM_BYTES = 4 * 1024 * 1024;
 const STRIPPED_ENV_KEYS = new Set([
@@ -32,10 +37,10 @@ const STRIPPED_ENV_KEYS = new Set([
   "DENO_OPTIONS",
 ]);
 
-const DB_PATH =
-  process.env.SAVE_TOKEN_DB_PATH ||
-  path.join(os.homedir(), ".gemini", "antigravity", "plugin_data", "save-token", "store.db");
-const HANDOFF_DIR = path.join(path.dirname(DB_PATH), "handoffs");
+const DB_PATH = resolveDbPath(process.env);
+const DATA_DIR = resolveDataDir(process.env);
+const HANDOFF_DIR = path.join(DATA_DIR, "handoffs");
+const PROGRESS_DIR = path.join(DATA_DIR, "progress");
 const ANTIGRAVITY_BRAIN_DIR =
   process.env.ANTIGRAVITY_BRAIN_DIR || path.join(os.homedir(), ".gemini", "antigravity", "brain");
 
@@ -43,7 +48,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "save_token_exec",
     description:
-      "REPL JavaScript cục bộ tối ưu token cho mọi tác vụ (code, dữ liệu, tài liệu, web tĩnh, CLI): giữ `state` xuyên lượt, hỗ trợ ``await $`...`.compact()``, `tools.fetchText(url)`, `tools.compactOutput()`, `tools.detectClis()`, `tools.saveMemory`/`loadMemory`, `tools.*`, và tự động index SQLite FTS5+Trigram bền vững.",
+      "REPL JavaScript cục bộ tối ưu token cho mọi tác vụ (code, dữ liệu, tài liệu, web tĩnh, CLI): giữ `state` xuyên lượt, hỗ trợ ``await $`...`.compact()``, `tools.outline()`, `tools.readSymbol()`, `tools.repoMap()`, `tools.toToon()`, `tools.fetchText(url)`, `tools.compactOutput()`, `tools.detectClis()`, `tools.saveMemory`/`loadMemory`, và tự động index SQLite FTS5+Trigram bền vững.",
     inputSchema: {
       type: "object",
       properties: {
@@ -89,12 +94,14 @@ const TOOL_DEFINITIONS = [
   {
     name: "save_token_search",
     description:
-      "Truy vấn lại dữ liệu/output lớn đã index trong kho SQLite bền vững (Porter BM25 + Trigram), hoạt động xuyên nhiều phiên chat.",
+      "Truy vấn lại dữ liệu/output lớn đã index trong kho SQLite bền vững (Porter BM25 + Trigram), hỗ trợ lọc cứng theo `branch` và `tags` để không quét lan sang ngữ cảnh khác.",
     inputSchema: {
       type: "object",
       properties: {
         queries: { type: "array", items: { type: "string" }, description: "Search queries." },
         source: { type: "string", description: "Optional source label filter (e.g. 'exec:1', 'handoff:...')." },
+        branch: { type: "string", description: "Optional context branch filter (e.g. 'auth-flow'). Strictly restricts search to that branch." },
+        tags: { type: "array", items: { type: "string" }, description: "Optional required tag labels (chunk source must contain all listed tags)." },
         limit: { type: "number", default: 5, description: "Max chunks per query (1..20)." },
         maxOutputChars: { type: "number", default: 8000, description: "Output character cap (500..32000)." },
       },
@@ -104,7 +111,7 @@ const TOOL_DEFINITIONS = [
   {
     name: "save_token_handoff",
     description:
-      "Đóng gói bàn giao ngữ cảnh phiên chat (0 token LLM): tự trích xuất yêu cầu, kết luận cuối, checkpoint/plan, tệp sửa và lỗi từ transcript (hỗ trợ conversationId dạng full UUID, prefix >= 6 ký tự hoặc 'latest'), lưu SQLite + tệp `.md` cô đọng.",
+      "Đóng gói bàn giao ngữ cảnh phiên chat (0 token LLM) theo `branch` và `tags`: tự trích xuất từ transcript, lưu SQLite + tệp `.md` + cập nhật `progress/<branch>.md` thời gian thực.",
     inputSchema: {
       type: "object",
       properties: {
@@ -115,6 +122,8 @@ const TOOL_DEFINITIONS = [
         },
         transcriptPath: { type: "string", description: "Optional explicit path to transcript_full.jsonl." },
         project: { type: "string", description: "Optional project name or path." },
+        branch: { type: "string", description: "Virtual context branch name (auto-inferred with 0 LLM tokens from git/prompt/files when omitted)." },
+        tags: { type: "array", items: { type: "string" }, description: "Topic/module tags attached to this handoff & its FTS5 source (auto-inferred when omitted)." },
         goal: { type: "string", description: "Current primary goal." },
         decisions: { type: "array", items: { type: "string" }, description: "Key technical decisions." },
         nextSteps: { type: "array", items: { type: "string" }, description: "Ordered remaining next steps." },
@@ -129,11 +138,13 @@ const TOOL_DEFINITIONS = [
   {
     name: "save_token_resume",
     description:
-      "Nạp lại ngữ cảnh phiên chat theo cơ chế 3 tầng (0 token LLM): bỏ trống để liệt kê, truyền `handoffId` ('latest' hoặc `<id>`), hoặc truyền thẳng `conversationId` (`<id|prefix|latest>`) để tự động chạy `save_token_handoff` xuất file `.md` cho phiên cũ đó rồi đọc lại ngay.",
+      "Nạp lại ngữ cảnh phiên chat theo cơ chế 3 tầng (0 token LLM): bỏ trống để liệt kê danh sách + nhánh, truyền `branch` (+ `tags` tùy chọn) để nạp tiến độ nhánh, truyền `handoffId`, hoặc truyền `conversationId`.",
     inputSchema: {
       type: "object",
       properties: {
         handoffId: { type: "string", description: "Omit for compact list; pass 'latest' or exact handoffId to load details." },
+        branch: { type: "string", description: "Load latest handoff, progress/<branch>.md, and scoped memory/sources for this context branch." },
+        tags: { type: "array", items: { type: "string" }, description: "Optional tags filter when resuming by branch." },
         conversationId: {
           type: "string",
           description:
@@ -170,9 +181,33 @@ const metrics = {
 const jobs = new Map();
 let jobSeq = 0;
 
+function parseTagsJson(raw) {
+  try {
+    const parsed = JSON.parse(String(raw || "[]"));
+    return Array.isArray(parsed) ? parsed.map(String) : [];
+  } catch {
+    return [];
+  }
+}
+
+function isSafePathWithin(targetPath, baseDir) {
+  if (!targetPath || !baseDir) return false;
+  const norm = (p) => (process.platform === "win32" ? path.resolve(p).toLowerCase() : path.resolve(p));
+  const rel = path.relative(norm(baseDir), norm(targetPath));
+  return rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel);
+}
+
+function ensureColumn(conn, table, column, defSql) {
+  const cols = conn.prepare(`PRAGMA table_info(${table})`).all();
+  if (!cols.some((c) => c.name === column)) {
+    conn.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${defSql}`);
+  }
+}
+
 function initDb() {
   fsSync.mkdirSync(path.dirname(DB_PATH), { recursive: true });
   fsSync.mkdirSync(HANDOFF_DIR, { recursive: true });
+  fsSync.mkdirSync(PROGRESS_DIR, { recursive: true });
   const conn = new DatabaseSync(DB_PATH);
   conn.exec(`
     PRAGMA busy_timeout = 5000;
@@ -215,6 +250,27 @@ function initDb() {
       bytes INTEGER NOT NULL,
       created_at INTEGER NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS metrics_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      ts INTEGER NOT NULL,
+      tool TEXT NOT NULL,
+      raw_bytes INTEGER NOT NULL,
+      returned_bytes INTEGER NOT NULL,
+      saved_bytes INTEGER NOT NULL,
+      project TEXT NOT NULL DEFAULT ''
+    );
+    CREATE INDEX IF NOT EXISTS idx_metrics_events_ts ON metrics_events(ts);
+  `);
+  ensureColumn(conn, "sources", "branch", "TEXT NOT NULL DEFAULT 'main'");
+  ensureColumn(conn, "sources", "tags_json", "TEXT NOT NULL DEFAULT '[]'");
+  ensureColumn(conn, "kv_memory", "branch", "TEXT NOT NULL DEFAULT 'main'");
+  ensureColumn(conn, "kv_memory", "tags_json", "TEXT NOT NULL DEFAULT '[]'");
+  ensureColumn(conn, "handoffs", "branch", "TEXT NOT NULL DEFAULT 'main'");
+  ensureColumn(conn, "handoffs", "tags_json", "TEXT NOT NULL DEFAULT '[]'");
+  conn.exec(`
+    CREATE INDEX IF NOT EXISTS idx_sources_branch ON sources(branch);
+    CREATE INDEX IF NOT EXISTS idx_kv_memory_branch ON kv_memory(branch);
+    CREATE INDEX IF NOT EXISTS idx_handoffs_branch_ts ON handoffs(branch, created_at);
   `);
   return conn;
 }
@@ -226,6 +282,20 @@ function closeDbQuietly() {
     db.close();
   } catch {
     // already closed
+  }
+}
+
+function recordMetricEvent(tool, rawBytes, returnedBytes, project = "") {
+  try {
+    const raw = Math.max(0, Math.trunc(Number(rawBytes) || 0));
+    const ret = Math.max(0, Math.trunc(Number(returnedBytes) || 0));
+    const saved = Math.max(0, raw - ret);
+    const proj = typeof project === "string" ? project.slice(0, 260) : "";
+    db.prepare(
+      "INSERT INTO metrics_events(ts, tool, raw_bytes, returned_bytes, saved_bytes, project) VALUES (?, ?, ?, ?, ?, ?)"
+    ).run(Date.now(), String(tool || "unknown"), raw, ret, saved, proj);
+  } catch {
+    // Metrics persistence is best-effort and must never break MCP tool execution.
   }
 }
 
@@ -296,91 +366,7 @@ function killTree(pid) {
   }
 }
 
-// ── RTK-style Output Compaction & HTML Text Extraction ───────────────
-
-function stripAnsi(s) {
-  return String(s)
-    .replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "")
-    .replace(/\x1B\][^\x07]*(?:\x07|\x1B\\)/g, "");
-}
-
-function compactOutput(raw, kind = "auto") {
-  const cleaned = stripAnsi(raw).replace(/\r\n/g, "\n");
-  // Resolve terminal carriage-return progress overwrites by keeping text after last \r per line
-  const rawLines = cleaned.split("\n").map((ln) => {
-    const idx = ln.lastIndexOf("\r");
-    return idx >= 0 ? ln.slice(idx + 1) : ln;
-  });
-
-  let detected = kind;
-  if (detected === "auto") {
-    const sample = rawLines.slice(0, 40).join("\n");
-    if (/^\s*(?:M|A|D|R|\?\?)\s+\S/m.test(sample) && rawLines.length > 12) detected = "git-status";
-    else if (/(?:PASS|FAIL|AssertionError|ERR!|Tests?:|passed|failed)/i.test(sample)) detected = "test";
-    else detected = "generic";
-  }
-
-  const out = [];
-  let blankRun = 0;
-  let i = 0;
-
-  if (detected === "test") {
-    let passSkipped = 0;
-    const flushPass = () => {
-      if (passSkipped > 0) {
-        out.push(`... [collapsed ${passSkipped} passing/progress lines]`);
-        passSkipped = 0;
-      }
-    };
-    for (const ln of rawLines) {
-      const trimmed = ln.trim();
-      const isImportant =
-        /(?:fail|error|err!|warn|exception|assert|fatal|traceback|summary|tests?:|total:|passed|failed|exit code)/i.test(
-          trimmed
-        );
-      const isPassOrNoise =
-        !isImportant &&
-        (/^(?:PASS|ok\s+\d+|✓|✔|\.\s*$)/i.test(trimmed) || /^\s*at\s+node:internal/.test(trimmed));
-      if (isPassOrNoise) {
-        passSkipped += 1;
-        continue;
-      }
-      flushPass();
-      if (trimmed === "") {
-        blankRun += 1;
-        if (blankRun <= 1) out.push("");
-      } else {
-        blankRun = 0;
-        out.push(ln);
-      }
-    }
-    flushPass();
-    return out.join("\n").trim();
-  }
-
-  while (i < rawLines.length) {
-    const cur = rawLines[i];
-    if (cur.trim() === "") {
-      blankRun += 1;
-      if (blankRun <= 1) out.push("");
-      i += 1;
-      continue;
-    }
-    blankRun = 0;
-    let rep = 1;
-    while (i + rep < rawLines.length && rawLines[i + rep] === cur) {
-      rep += 1;
-    }
-    if (rep > 2) {
-      out.push(`${cur} ... (x${rep} repeats)`);
-      i += rep;
-    } else {
-      out.push(cur);
-      i += 1;
-    }
-  }
-  return out.join("\n").trim();
-}
+// ── HTML Text Extraction (compactOutput imported from ../scripts/compact-engine.mjs) ──
 
 function htmlToCleanText(html) {
   let s = String(html)
@@ -531,10 +517,12 @@ function chunkText(text, maxBytes = DEFAULT_CHUNK_BYTES) {
   return chunks;
 }
 
-function indexIntoStore(label, text, maxChunkBytes = DEFAULT_CHUNK_BYTES) {
+function indexIntoStore(label, text, maxChunkBytes = DEFAULT_CHUNK_BYTES, opts = {}) {
   const cleanLabel = String(label);
   const chunks = chunkText(text, maxChunkBytes);
   const bytesTotal = utf8Bytes(String(text));
+  const branch = normalizeBranch(opts.branch);
+  const tagsJson = JSON.stringify(normalizeTags(opts.tags));
 
   db.exec("BEGIN IMMEDIATE");
   try {
@@ -546,9 +534,9 @@ function indexIntoStore(label, text, maxChunkBytes = DEFAULT_CHUNK_BYTES) {
     }
     const row = db
       .prepare(
-        "INSERT INTO sources(label, bytes_total, chunk_count, created_at) VALUES (?, ?, ?, ?) RETURNING id"
+        "INSERT INTO sources(label, bytes_total, chunk_count, created_at, branch, tags_json) VALUES (?, ?, ?, ?, ?, ?) RETURNING id"
       )
-      .get(cleanLabel, bytesTotal, chunks.length, Date.now());
+      .get(cleanLabel, bytesTotal, chunks.length, Date.now(), branch, tagsJson);
     const sourceId = Number(row.id);
 
     const insChunk = db.prepare("INSERT INTO chunks(source_id, ord, title, body) VALUES (?, ?, ?, ?)");
@@ -558,7 +546,7 @@ function indexIntoStore(label, text, maxChunkBytes = DEFAULT_CHUNK_BYTES) {
       insTri.run(sourceId, c.ord, c.title, c.text);
     }
     db.exec("COMMIT");
-    return { sourceId, label: cleanLabel, chunkCount: chunks.length, bytesTotal };
+    return { sourceId, label: cleanLabel, chunkCount: chunks.length, bytesTotal, branch };
   } catch (err) {
     if (db.isTransaction) db.exec("ROLLBACK");
     throw err;
@@ -585,8 +573,11 @@ function buildFtsMatches(query) {
   return { porterAnd, porterOr, trigramAnd, trigramOr };
 }
 
-function queryStore(query, { source, limit = 5, sourceId } = {}) {
+function queryStore(query, { source, branch, tags, limit = 5, sourceId } = {}) {
   const lim = clampNumber(limit, 1, 20, 5);
+  const cleanBranch = typeof branch === "string" && branch.trim() ? normalizeBranch(branch) : null;
+  const reqTags = normalizeTags(tags);
+  const fetchLimit = reqTags.length > 0 ? Math.min(80, lim * 4) : lim;
   const { porterAnd, porterOr, trigramAnd, trigramOr } = buildFtsMatches(query);
   const seen = new Set();
   const hits = [];
@@ -595,10 +586,14 @@ function queryStore(query, { source, limit = 5, sourceId } = {}) {
     for (const r of rows) {
       const k = `${r.source_id}:${r.ord}`;
       if (seen.has(k)) continue;
+      const rowTags = parseTagsJson(r.tags_json);
+      if (reqTags.length > 0 && !reqTags.every((t) => rowTags.includes(t))) continue;
       seen.add(k);
       hits.push({
         sourceId: Number(r.source_id),
         source: r.label,
+        branch: r.branch || "main",
+        tags: rowTags,
         ord: Number(r.ord),
         title: r.title || "",
         body: r.body,
@@ -614,17 +609,18 @@ function queryStore(query, { source, limit = 5, sourceId } = {}) {
     try {
       return db
         .prepare(
-          `SELECT c.source_id, c.ord, c.title, c.body, s.label,
+          `SELECT c.source_id, c.ord, c.title, c.body, s.label, s.branch, s.tags_json,
                   -bm25(chunks, 0, 0, 1.0, 1.0) AS score
            FROM chunks c
            JOIN sources s ON s.id = c.source_id
            WHERE chunks MATCH ?
              AND (? IS NULL OR s.label = ?)
              AND (? IS NULL OR c.source_id = ?)
+             AND (? IS NULL OR s.branch = ?)
            ORDER BY score DESC, c.source_id DESC, c.ord ASC
            LIMIT ?`
         )
-        .all(expr, source ?? null, source ?? null, sourceId ?? null, sourceId ?? null, lim);
+        .all(expr, source ?? null, source ?? null, sourceId ?? null, sourceId ?? null, cleanBranch, cleanBranch, fetchLimit);
     } catch {
       return [];
     }
@@ -635,17 +631,18 @@ function queryStore(query, { source, limit = 5, sourceId } = {}) {
     try {
       return db
         .prepare(
-          `SELECT t.source_id, t.ord, t.title, t.body, s.label,
+          `SELECT t.source_id, t.ord, t.title, t.body, s.label, s.branch, s.tags_json,
                   -bm25(chunks_tri, 0, 0, 1.0, 1.0) AS score
            FROM chunks_tri t
            JOIN sources s ON s.id = t.source_id
            WHERE chunks_tri MATCH ?
              AND (? IS NULL OR s.label = ?)
              AND (? IS NULL OR t.source_id = ?)
+             AND (? IS NULL OR s.branch = ?)
            ORDER BY score DESC, t.source_id DESC, t.ord ASC
            LIMIT ?`
         )
-        .all(expr, source ?? null, source ?? null, sourceId ?? null, sourceId ?? null, lim);
+        .all(expr, source ?? null, source ?? null, sourceId ?? null, sourceId ?? null, cleanBranch, cleanBranch, fetchLimit);
     } catch {
       return [];
     }
@@ -763,14 +760,16 @@ function truncateStructured(value, budgetChars) {
 function saveMemory(key, value, opts = {}) {
   const cleanKey = String(key);
   const project = String(opts.project ?? "");
+  const branch = normalizeBranch(opts.branch);
+  const tagsJson = JSON.stringify(normalizeTags(opts.tags));
   const json = JSON.stringify(value);
   const bytes = utf8Bytes(json);
   db.prepare(
-    `INSERT INTO kv_memory(key, project, value_json, bytes, updated_at)
-     VALUES (?, ?, ?, ?, ?)
-     ON CONFLICT(key) DO UPDATE SET project=excluded.project, value_json=excluded.value_json, bytes=excluded.bytes, updated_at=excluded.updated_at`
-  ).run(cleanKey, project, json, bytes, Date.now());
-  return { key: cleanKey, project, bytes };
+    `INSERT INTO kv_memory(key, project, value_json, bytes, updated_at, branch, tags_json)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(key) DO UPDATE SET project=excluded.project, value_json=excluded.value_json, bytes=excluded.bytes, updated_at=excluded.updated_at, branch=excluded.branch, tags_json=excluded.tags_json`
+  ).run(cleanKey, project, json, bytes, Date.now(), branch, tagsJson);
+  return { key: cleanKey, project, branch, tags: parseTagsJson(tagsJson), bytes };
 }
 
 function loadMemory(key) {
@@ -779,15 +778,32 @@ function loadMemory(key) {
   return JSON.parse(row.value_json);
 }
 
-function listMemory(project) {
-  const p = project ? String(project) : null;
-  return db
+function listMemory(projectOrOpts) {
+  const opts =
+    projectOrOpts && typeof projectOrOpts === "object"
+      ? projectOrOpts
+      : { project: projectOrOpts };
+  const p = opts.project ? String(opts.project) : null;
+  const b = typeof opts.branch === "string" && opts.branch.trim() ? normalizeBranch(opts.branch) : null;
+  const reqTags = normalizeTags(opts.tags);
+  const rows = db
     .prepare(
-      `SELECT key, project, bytes, updated_at FROM kv_memory
+      `SELECT key, project, branch, tags_json, bytes, updated_at FROM kv_memory
        WHERE (? IS NULL OR project = ?)
+         AND (? IS NULL OR branch = ?)
        ORDER BY updated_at DESC`
     )
-    .all(p, p);
+    .all(p, p, b, b);
+  return rows
+    .map((r) => ({
+      key: r.key,
+      project: r.project,
+      branch: r.branch || "main",
+      tags: parseTagsJson(r.tags_json),
+      bytes: r.bytes,
+      updated_at: r.updated_at,
+    }))
+    .filter((r) => reqTags.length === 0 || reqTags.every((t) => r.tags.includes(t)));
 }
 
 // ── Glob & Sandbox Tools ─────────────────────────────────────────────
@@ -979,6 +995,58 @@ function buildSandboxTools(baseCwd, mode, defaultTimeoutMs, byteTracker) {
     );
   }
 
+  async function outline(target = ".", opts = {}) {
+    const rawTarget = String(target || ".");
+    const isPattern = /[*?{}]/.test(rawTarget);
+    if (!isPattern) {
+      const s = await stat(rawTarget);
+      if (s.isFile) {
+        const text = await read(rawTarget);
+        return { path: toPosix(rawTarget), ...extractOutline(text, rawTarget, opts) };
+      }
+    }
+    const maxFiles = clampNumber(opts.maxFiles, 1, 50, 20);
+    const matches = await glob(isPattern ? rawTarget : "**/*", {
+      dir: isPattern ? opts.dir ?? "." : rawTarget,
+      ignore: opts.ignore ?? [],
+    });
+    const outFiles = [];
+    for (const rel of matches.slice(0, maxFiles)) {
+      const fullTarget = isPattern ? path.join(opts.dir ?? ".", rel) : path.join(rawTarget, rel);
+      try {
+        const text = await read(fullTarget);
+        outFiles.push({ path: toPosix(rel), ...extractOutline(text, rel, opts) });
+      } catch {
+        // skip binary/unreadable
+      }
+    }
+    return { totalMatched: matches.length, shown: outFiles.length, files: outFiles };
+  }
+
+  async function readSymbol(filePath, symbolName, opts = {}) {
+    const text = await read(filePath);
+    return { path: toPosix(filePath), ...extractSymbolSlice(text, filePath, symbolName, opts) };
+  }
+
+  async function repoMap(target = ".", opts = {}) {
+    const absTarget = resolvePath(target);
+    const map = buildRepoMap(absTarget, opts);
+    byteTracker.rawBytes += Buffer.byteLength(map.text || "", "utf8");
+    return map;
+  }
+
+  function compactData(raw, opts = {}) {
+    return compactStructuredData(raw, opts);
+  }
+
+  function toToon(value, opts = {}) {
+    return encodeToon(value, opts);
+  }
+
+  function stripComments(code, filePath = "") {
+    return stripSourceComments(code, filePath);
+  }
+
   async function grep(pattern, opts = {}) {
     const dir = opts.dir ?? ".";
     const rootDir = resolvePath(dir);
@@ -1114,7 +1182,10 @@ function buildSandboxTools(baseCwd, mode, defaultTimeoutMs, byteTracker) {
         },
         async compact(kind = "auto") {
           const res = await run();
-          return compactOutput([res.stdout, res.stderr].filter(Boolean).join("\n"), kind);
+          const compactOpts = typeof kind === "string"
+            ? { kind, commandHint: cmdStr }
+            : { ...(kind || {}), commandHint: cmdStr };
+          return compactOutput([res.stdout, res.stderr].filter(Boolean).join("\n"), compactOpts);
         },
       };
     };
@@ -1272,9 +1343,9 @@ function buildSandboxTools(baseCwd, mode, defaultTimeoutMs, byteTracker) {
     return { available, missing };
   }
 
-  function index(label, text) {
-    const info = indexIntoStore(label, String(text));
-    return { source: info.label, chunks: info.chunkCount, bytes: info.bytesTotal };
+  function index(label, text, opts = {}) {
+    const info = indexIntoStore(label, String(text), DEFAULT_CHUNK_BYTES, opts);
+    return { source: info.label, branch: info.branch, chunks: info.chunkCount, bytes: info.bytesTotal };
   }
 
   function search(queries, opts = {}) {
@@ -1283,7 +1354,7 @@ function buildSandboxTools(baseCwd, mode, defaultTimeoutMs, byteTracker) {
     const seen = new Set();
     const hits = [];
     for (const q of list) {
-      for (const h of queryStore(q, { source: opts.source, limit })) {
+      for (const h of queryStore(q, { source: opts.source, branch: opts.branch, tags: opts.tags, limit })) {
         const k = `${h.source}:${h.ord}`;
         if (seen.has(k)) continue;
         seen.add(k);
@@ -1412,6 +1483,9 @@ function buildSandboxTools(baseCwd, mode, defaultTimeoutMs, byteTracker) {
       read,
       readJson,
       readMany,
+      outline,
+      readSymbol,
+      repoMap,
       grep,
       shell,
       write,
@@ -1419,6 +1493,9 @@ function buildSandboxTools(baseCwd, mode, defaultTimeoutMs, byteTracker) {
       replace,
       batchReplace,
       compactOutput,
+      compactData,
+      toToon,
+      stripComments,
       fetchText,
       detectClis,
       saveMemory,
@@ -1797,18 +1874,30 @@ async function executeCodeMode(args = {}) {
       }
     }
 
+    const outBytes = utf8Bytes(outBody);
     const indexTag = indexedLabel ? ` | INDEXED as "${indexedLabel}"` : "";
-    const finalText = `${outBody}\n[save-token | ${elapsedMs}ms | mode=${mode} | raw=${processedBytes}B | returned=${utf8Bytes(outBody)}B${indexTag}]`;
+    const guardTag =
+      outBytes >= 9000
+        ? " | WARN: output >=9KB risks host output.txt spill; filter in JS or lower maxOutputChars"
+        : indexedLabel && !intent
+          ? ` | TIP: filter in JS or query via save_token_search(source="${indexedLabel}")`
+          : "";
+    const finalText = `${outBody}\n[save-token | ${elapsedMs}ms | mode=${mode} | raw=${processedBytes}B | returned=${outBytes}B${indexTag}${guardTag}]`;
+    const finalBytes = utf8Bytes(finalText);
     metrics.rawBytes += processedBytes;
-    metrics.returnedBytes += utf8Bytes(finalText);
+    metrics.returnedBytes += finalBytes;
+    recordMetricEvent("exec", processedBytes, finalBytes, toPosix(cwd));
     return { isError: false, text: finalText };
   } catch (err) {
     const elapsedMs = Date.now() - startMs;
     const msg = err?.stack || err?.message || String(err);
     const logPrefix = logs.length > 0 ? `--- logs ---\n${logs.join("\n")}\n` : "";
     const text = `${logPrefix}Error: ${msg}\n[save-token | ${elapsedMs}ms | mode=${mode} | failed]`;
-    metrics.rawBytes += Math.max(byteTracker.internalBytes, utf8Bytes(text));
-    metrics.returnedBytes += utf8Bytes(text);
+    const errRaw = Math.max(byteTracker.internalBytes, utf8Bytes(text));
+    const errRet = utf8Bytes(text);
+    metrics.rawBytes += errRaw;
+    metrics.returnedBytes += errRet;
+    recordMetricEvent("exec_error", errRaw, errRet, toPosix(cwd));
     return { isError: true, text };
   } finally {
     if (timer) clearTimeout(timer);
@@ -1850,8 +1939,10 @@ async function executePoll(args = {}) {
 
   const header = `[poll ${jobId} | status=${rec.status} | exit=${rec.exitCode} | elapsed=${elapsedMs}ms${indexedLabel ? ` | INDEXED as "${indexedLabel}"` : ""}]`;
   const finalText = display ? `${header}\n${display}` : header;
+  const pollRetBytes = utf8Bytes(finalText);
   metrics.rawBytes += rawBytes;
-  metrics.returnedBytes += utf8Bytes(finalText);
+  metrics.returnedBytes += pollRetBytes;
+  recordMetricEvent("poll", rawBytes, pollRetBytes, "");
   return { isError: false, text: finalText };
 }
 
@@ -1862,6 +1953,8 @@ function executeSearch(args = {}) {
     return { isError: true, text: "Invalid arguments: 'queries' must be a non-empty string array." };
   }
   const source = typeof args.source === "string" && args.source.trim() ? args.source.trim() : undefined;
+  const branch = typeof args.branch === "string" && args.branch.trim() ? normalizeBranch(args.branch) : undefined;
+  const tags = normalizeTags(args.tags);
   const limit = clampNumber(args.limit, 1, 20, 5);
   const maxOutputChars = clampNumber(args.maxOutputChars, 500, 32000, 8000);
 
@@ -1870,16 +1963,19 @@ function executeSearch(args = {}) {
   let used = 0;
 
   for (const q of queries) {
-    const hits = queryStore(q, { source, limit });
-    const lines = [`## Query: ${q}`];
+    const hits = queryStore(q, { source, branch, tags, limit });
+    const scopeLabel = [branch ? `branch=${branch}` : "", tags.length ? `tags=${tags.join(",")}` : ""].filter(Boolean).join(" | ");
+    const lines = [`## Query: ${q}${scopeLabel ? ` [${scopeLabel}]` : ""}`];
     if (hits.length === 0) {
-      lines.push("(no matches)");
+      lines.push(scopeLabel ? "(no matches in scope)" : "(no matches)");
     } else {
       for (const h of hits) {
         const k = `${h.sourceId}:${h.ord}`;
         if (seen.has(k)) continue;
         seen.add(k);
-        const head = `[${h.source} #${h.ord}${h.title ? ` | ${h.title}` : ""} | ${h.tier}]`;
+        const branchTag = h.branch && h.branch !== "main" ? ` | branch=${h.branch}` : "";
+        const tagsPart = h.tags && h.tags.length > 0 ? ` | tags=${h.tags.join(",")}` : "";
+        const head = `[${h.source} #${h.ord}${h.title ? ` | ${h.title}` : ""}${branchTag}${tagsPart} | ${h.tier}]`;
         const block = `${head}\n${h.body}`;
         if (used + block.length > maxOutputChars - 120 && sections.length > 0) break;
         lines.push(block);
@@ -1891,13 +1987,59 @@ function executeSearch(args = {}) {
 
   const totalIndexedBytes = Number(db.prepare("SELECT COALESCE(SUM(bytes_total), 0) AS n FROM sources").get().n);
   const out = sections.join("\n\n").slice(0, maxOutputChars);
+  const searchRetBytes = utf8Bytes(out);
   metrics.rawBytes += totalIndexedBytes;
-  metrics.returnedBytes += utf8Bytes(out);
+  metrics.returnedBytes += searchRetBytes;
+  recordMetricEvent("search", totalIndexedBytes, searchRetBytes, "");
   return { isError: false, text: out };
 }
 
 function stripSourceSigHeader(text) {
   return String(text || "").replace(/^<!--\s*source-sig:[^>]*-->\r?\n/, "");
+}
+
+function writeBranchProgressFile(branch, meta = {}) {
+  const cleanBranch = normalizeBranch(branch);
+  const progressPath = toPosix(path.join(PROGRESS_DIR, `${cleanBranch}.md`));
+  if (!isSafePathWithin(progressPath, PROGRESS_DIR)) return "";
+
+  const tags = normalizeTags(meta.tags);
+  const branchMem = listMemory({ branch: cleanBranch }).slice(0, 8);
+  const branchSources = db
+    .prepare("SELECT label, bytes_total AS bytes, tags_json FROM sources WHERE branch = ? ORDER BY id DESC LIMIT 10")
+    .all(cleanBranch)
+    .map((r) => ({ label: r.label, bytes: r.bytes, tags: parseTagsJson(r.tags_json) }));
+
+  const lines = [
+    `# Progress Branch: ${cleanBranch}`,
+    `- Updated: ${new Date().toISOString()}`,
+    ...(meta.project ? [`- Project: ${meta.project}`] : []),
+    ...(tags.length ? [`- Tags: ${tags.join(", ")}`] : []),
+    ...(meta.handoffId ? [`- Latest Handoff: ${meta.handoffId} (${meta.title || ""})`] : []),
+  ];
+
+  if (meta.summaryMd) {
+    lines.push("", "## Active Snapshot", clipBlock(stripSourceSigHeader(meta.summaryMd), 1300));
+  }
+  if (branchMem.length > 0) {
+    lines.push("", "## Branch Memory (`kv_memory`)");
+    for (const m of branchMem) {
+      lines.push(`- \`${m.key}\`${m.tags?.length ? ` [${m.tags.join(",")}]` : ""} (${m.bytes}B)`);
+    }
+  }
+  if (branchSources.length > 0) {
+    lines.push("", "## Scoped Sources (`save_token_search`)");
+    for (const s of branchSources) {
+      lines.push(`- \`${s.label}\`${s.tags.length ? ` [${s.tags.join(",")}]` : ""} (${s.bytes}B)`);
+    }
+  }
+  const sampleTagArg = tags.length ? `, tags: ${JSON.stringify(tags)}` : "";
+  lines.push("", "## Quick Recall", `- \`save_token_search({ queries: ["<keyword>"], branch: "${cleanBranch}"${sampleTagArg} })\``);
+
+  const md = capBytes(lines.join("\n").trim(), 2600).text.trimEnd() + "\n";
+  fsSync.mkdirSync(PROGRESS_DIR, { recursive: true });
+  fsSync.writeFileSync(progressPath, md, "utf8");
+  return progressPath;
 }
 
 async function executeHandoff(args = {}) {
@@ -1920,6 +2062,9 @@ async function executeHandoff(args = {}) {
     !(Array.isArray(args.saveStateKeys) && args.saveStateKeys.length > 0);
   const maxChars = clampNumber(args.maxChars, 800, 8000, isPureAuto ? 3800 : 2400);
   const projectArg = typeof args.project === "string" ? args.project.trim() : "";
+  const rawBranchArg = typeof args.branch === "string" ? args.branch.trim() : "";
+  const hasExplicitBranch = rawBranchArg.length > 0 && rawBranchArg.toLowerCase() !== "auto";
+  const tagsArg = normalizeTags(args.tags);
 
   let resolvedConv = null;
   let resolvedConvId = convArg;
@@ -1948,7 +2093,7 @@ async function executeHandoff(args = {}) {
   );
   const nodeCmd = process.execPath.includes(" ") ? `"${process.execPath}"` : process.execPath;
 
-  if (isPureAuto && args.force !== true && sourceSig) {
+  if (isPureAuto && args.force !== true && sourceSig && !hasExplicitBranch && tagsArg.length === 0) {
     const cachedRow = db
       .prepare("SELECT * FROM handoffs WHERE conversation_id = ? ORDER BY created_at DESC LIMIT 1")
       .get(resolvedConvId);
@@ -1958,12 +2103,18 @@ async function executeHandoff(args = {}) {
         const firstLine = diskText.split(/\r?\n/, 1)[0].trim();
         if (firstLine === sourceSig) {
           const cleanMd = stripSourceSigHeader(diskText).trimEnd();
+          const cachedBranch = normalizeBranch(cachedRow.branch);
+          const cachedTags = parseTagsJson(cachedRow.tags_json);
+          const progressPath = toPosix(path.join(PROGRESS_DIR, `${cachedBranch}.md`));
           const nextChatCommand = `${nodeCmd} "${scriptPath}" --handoff "${cachedRow.file_path}" --title "${cachedRow.title.replace(/"/g, '\\"')}"`;
           const out = JSON.stringify(
             {
               handoffId: cachedRow.id,
               conversationId: resolvedConvId,
+              branch: cachedBranch,
+              tags: cachedTags,
               filePath: cachedRow.file_path,
+              progressPath: fsSync.existsSync(progressPath) ? progressPath : "",
               bytes: cachedRow.bytes,
               estTokens: Math.round(cachedRow.bytes / 4),
               savedMemoryKeys: [],
@@ -1974,22 +2125,14 @@ async function executeHandoff(args = {}) {
             null,
             2
           );
-          metrics.returnedBytes += utf8Bytes(out);
+          const retBytes = utf8Bytes(out);
+          const srcBytes = resolvedConv?.stat?.size || retBytes;
+          metrics.returnedBytes += retBytes;
+          recordMetricEvent("handoff", Math.max(srcBytes, retBytes), retBytes, cachedRow.project || projectArg);
           return { isError: false, text: out };
         }
       } catch {
         // Fall through and rebuild handoff if cached file read fails.
-      }
-    }
-  }
-
-  const savedMemoryKeys = [];
-  if (Array.isArray(args.saveStateKeys)) {
-    for (const k of args.saveStateKeys) {
-      const key = String(k);
-      if (Object.prototype.hasOwnProperty.call(sessionState, key)) {
-        saveMemory(key, sessionState[key], { project: projectArg });
-        savedMemoryKeys.push(key);
       }
     }
   }
@@ -2003,9 +2146,42 @@ async function executeHandoff(args = {}) {
     clipInline(extracted.firstUserPrompt || `Session ${resolvedConvId ? resolvedConvId.slice(0, 8) : "snapshot"}`, 72);
   const project = projectArg || extracted.workspace || "";
 
+  const branchInfo = hasExplicitBranch
+    ? { branch: normalizeBranch(rawBranchArg), inferred: false, source: "explicit" }
+    : inferBranch({
+        explicitBranch: args.branch,
+        workspace: extracted.workspace,
+        project,
+        title,
+        firstUserPrompt: extracted.firstUserPrompt,
+        touchedFiles: extracted.touchedFiles,
+      });
+  const branchArg = branchInfo.branch;
+
+  const tagInfo = inferTags({
+    explicitTags: args.tags,
+    touchedFiles: extracted.touchedFiles,
+    title,
+    firstUserPrompt: extracted.firstUserPrompt,
+    recentErrors: extracted.recentErrors,
+  });
+  const finalTags = tagInfo.tags;
+
+  const savedMemoryKeys = [];
+  if (Array.isArray(args.saveStateKeys)) {
+    for (const k of args.saveStateKeys) {
+      const key = String(k);
+      if (Object.prototype.hasOwnProperty.call(sessionState, key)) {
+        saveMemory(key, sessionState[key], { project: projectArg, branch: branchArg, tags: finalTags });
+        savedMemoryKeys.push(key);
+      }
+    }
+  }
+
   const lines = [
     `# Handoff: ${title}`,
     `- Created: ${new Date().toISOString()}${extracted.stepCount ? ` | Steps: ${extracted.stepCount} | UserTurns: ${extracted.userTurnCount}` : ""}`,
+    `- Branch: ${branchArg}${finalTags.length ? ` | Tags: ${finalTags.join(", ")}` : ""}`,
     ...(project ? [`- Project: ${project}`] : []),
     ...(resolvedConvId ? [`- Source Conversation: ${resolvedConvId}`] : []),
     ...(args.goal ? ["", "## Goal", String(args.goal).trim()] : []),
@@ -2073,12 +2249,20 @@ async function executeHandoff(args = {}) {
   await fs.writeFile(filePath, `${sourceSig ? `${sourceSig}\n` : ""}${summaryMd}\n`, "utf8");
 
   const bytes = utf8Bytes(summaryMd);
+  const tagsJson = JSON.stringify(finalTags);
   db.prepare(
-    `INSERT INTO handoffs(id, title, project, conversation_id, file_path, summary_md, bytes, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run(handoffId, title, project, resolvedConvId, filePath, summaryMd, bytes, Date.now());
+    `INSERT INTO handoffs(id, title, project, conversation_id, file_path, summary_md, bytes, created_at, branch, tags_json)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(handoffId, title, project, resolvedConvId, filePath, summaryMd, bytes, Date.now(), branchArg, tagsJson);
 
-  indexIntoStore(`handoff:${handoffId}`, summaryMd);
+  indexIntoStore(`handoff:${handoffId}`, summaryMd, DEFAULT_CHUNK_BYTES, { branch: branchArg, tags: finalTags });
+  const progressPath = writeBranchProgressFile(branchArg, {
+    handoffId,
+    title,
+    project,
+    tags: finalTags,
+    summaryMd,
+  });
 
   const nextChatCommand = `${nodeCmd} "${scriptPath}" --handoff "${filePath}" --title "${title.replace(/"/g, '\\"')}"`;
 
@@ -2086,7 +2270,13 @@ async function executeHandoff(args = {}) {
     {
       handoffId,
       conversationId: resolvedConvId,
+      branch: branchArg,
+      branchInferred: branchInfo.inferred,
+      branchSource: branchInfo.source,
+      tags: finalTags,
+      tagsInferred: tagInfo.inferred,
       filePath,
+      progressPath,
       bytes,
       estTokens: Math.round(bytes / 4),
       savedMemoryKeys,
@@ -2097,13 +2287,43 @@ async function executeHandoff(args = {}) {
     null,
     2
   );
-  metrics.returnedBytes += utf8Bytes(out);
+  const retBytes = utf8Bytes(out);
+  const srcBytes = resolvedConv?.stat?.size || retBytes;
+  metrics.returnedBytes += retBytes;
+  recordMetricEvent("handoff", Math.max(srcBytes, retBytes), retBytes, project);
   return { isError: false, text: out };
 }
 
 async function executeResume(args = {}) {
   metrics.calls.resume += 1;
   const convArg = typeof args.conversationId === "string" ? args.conversationId.trim() : "";
+  const branchArg = typeof args.branch === "string" && args.branch.trim() ? normalizeBranch(args.branch) : "";
+  const reqTags = normalizeTags(args.tags);
+
+  const listBranchesSummary = () => {
+    const hdRows = db
+      .prepare(
+        "SELECT id, title, project, branch, tags_json, created_at FROM handoffs ORDER BY created_at DESC LIMIT 80"
+      )
+      .all();
+    const byBranch = new Map();
+    for (const r of hdRows) {
+      const b = normalizeBranch(r.branch);
+      if (!byBranch.has(b)) {
+        const pPath = toPosix(path.join(PROGRESS_DIR, `${b}.md`));
+        byBranch.set(b, {
+          branch: b,
+          latestHandoffId: r.id,
+          title: r.title,
+          project: r.project || "",
+          tags: parseTagsJson(r.tags_json),
+          progressPath: fsSync.existsSync(pPath) ? pPath : "",
+          updatedAt: r.created_at,
+        });
+      }
+    }
+    return [...byBranch.values()];
+  };
 
   if (convArg) {
     let resolved;
@@ -2115,6 +2335,8 @@ async function executeResume(args = {}) {
 
     const handoffRes = await executeHandoff({
       conversationId: resolved.id,
+      ...(branchArg ? { branch: branchArg } : {}),
+      ...(reqTags.length ? { tags: reqTags } : {}),
       maxChars: typeof args.maxChars === "number" ? args.maxChars : 3800,
     });
     if (handoffRes.isError) return handoffRes;
@@ -2130,11 +2352,14 @@ async function executeResume(args = {}) {
       }
     }
 
-    const memoryKeys = listMemory((row && row.project) || undefined);
+    const activeBranch = normalizeBranch(row?.branch || handoffData.branch);
+    const memoryKeys = listMemory({ project: (row && row.project) || undefined, branch: activeBranch });
     const recentIndexedSources = db
-      .prepare("SELECT label, bytes_total AS bytes, chunk_count AS chunks FROM sources ORDER BY id DESC LIMIT 10")
-      .all();
+      .prepare("SELECT label, branch, tags_json, bytes_total AS bytes, chunk_count AS chunks FROM sources WHERE branch = ? ORDER BY id DESC LIMIT 10")
+      .all(activeBranch)
+      .map((s) => ({ label: s.label, branch: s.branch, tags: parseTagsJson(s.tags_json), bytes: s.bytes, chunks: s.chunks }));
 
+    const pPath = toPosix(path.join(PROGRESS_DIR, `${activeBranch}.md`));
     const out = JSON.stringify(
       {
         layer: 2,
@@ -2144,8 +2369,11 @@ async function executeResume(args = {}) {
           id: handoffData.handoffId,
           title: row ? row.title : "",
           project: row ? row.project : "",
+          branch: activeBranch,
+          tags: parseTagsJson(row?.tags_json),
           conversationId: resolved.id,
           filePath: handoffData.filePath,
+          progressPath: fsSync.existsSync(pPath) ? pPath : "",
           createdAt: row ? row.created_at : Date.now(),
           summaryMd: summaryFromFile,
         },
@@ -2155,32 +2383,64 @@ async function executeResume(args = {}) {
       null,
       2
     );
-    metrics.returnedBytes += utf8Bytes(out);
+    const retBytes = utf8Bytes(out);
+    metrics.returnedBytes += retBytes;
+    recordMetricEvent("resume", retBytes, retBytes, (row && row.project) || "");
     return { isError: false, text: out };
   }
 
   const id = typeof args.handoffId === "string" ? args.handoffId.trim() : "";
 
-  if (!id) {
-    // Layer 1: compact index list
+  if (!id && !branchArg) {
+    // Layer 1: compact index list + virtual context branches
     const list = db
       .prepare(
-        "SELECT id, title, project, conversation_id AS conversationId, bytes, created_at AS createdAt FROM handoffs ORDER BY created_at DESC LIMIT 10"
+        "SELECT id, title, project, branch, tags_json, conversation_id AS conversationId, bytes, created_at AS createdAt FROM handoffs ORDER BY created_at DESC LIMIT 10"
       )
-      .all();
-    const out = JSON.stringify({ layer: 1, count: list.length, handoffs: list }, null, 2);
-    metrics.returnedBytes += utf8Bytes(out);
+      .all()
+      .map((r) => ({
+        id: r.id,
+        title: r.title,
+        project: r.project,
+        branch: normalizeBranch(r.branch),
+        tags: parseTagsJson(r.tags_json),
+        conversationId: r.conversationId,
+        bytes: r.bytes,
+        createdAt: r.createdAt,
+      }));
+    const branches = listBranchesSummary();
+    const out = JSON.stringify({ layer: 1, count: list.length, handoffs: list, branches }, null, 2);
+    const retBytes = utf8Bytes(out);
+    metrics.returnedBytes += retBytes;
+    recordMetricEvent("resume", retBytes, retBytes, "");
     return { isError: false, text: out };
   }
 
-  // Layer 2: full handoff summary + memory keys + recent FTS5 sources
-  const row =
-    id === "latest"
-      ? db.prepare("SELECT * FROM handoffs ORDER BY created_at DESC LIMIT 1").get()
-      : db.prepare("SELECT * FROM handoffs WHERE id = ?").get(id);
+  // Layer 2: full handoff summary + branch-scoped memory keys & FTS5 sources
+  let row = null;
+  if (branchArg && (!id || id === "latest")) {
+    const candidates = db
+      .prepare("SELECT * FROM handoffs WHERE branch = ? ORDER BY created_at DESC LIMIT 25")
+      .all(branchArg);
+    row =
+      reqTags.length === 0
+        ? candidates[0] || null
+        : candidates.find((c) => {
+            const cTags = parseTagsJson(c.tags_json);
+            return reqTags.every((t) => cTags.includes(t));
+          }) || null;
+  } else {
+    row =
+      id === "latest"
+        ? db.prepare("SELECT * FROM handoffs ORDER BY created_at DESC LIMIT 1").get()
+        : db.prepare("SELECT * FROM handoffs WHERE id = ?").get(id);
+  }
 
   if (!row) {
-    return { isError: true, text: `Handoff not found: "${id}"` };
+    return {
+      isError: true,
+      text: branchArg ? `No handoff found for branch "${branchArg}"` : `Handoff not found: "${id}"`,
+    };
   }
 
   let summaryFromFile = row.summary_md;
@@ -2192,10 +2452,30 @@ async function executeResume(args = {}) {
     }
   }
 
-  const memoryKeys = listMemory(row.project || undefined);
-  const recentIndexedSources = db
-    .prepare("SELECT label, bytes_total AS bytes, chunk_count AS chunks FROM sources ORDER BY id DESC LIMIT 10")
-    .all();
+  const activeBranch = normalizeBranch(row.branch);
+  const pPath = toPosix(path.join(PROGRESS_DIR, `${activeBranch}.md`));
+  let progressMd = "";
+  if (fsSync.existsSync(pPath)) {
+    try {
+      progressMd = fsSync.readFileSync(pPath, "utf8").trimEnd();
+    } catch {
+      progressMd = "";
+    }
+  }
+
+  const memoryKeys = branchArg
+    ? listMemory({ branch: activeBranch, tags: reqTags })
+    : listMemory(row.project || undefined);
+  const recentIndexedSources = branchArg
+    ? db
+        .prepare("SELECT label, branch, tags_json, bytes_total AS bytes, chunk_count AS chunks FROM sources WHERE branch = ? ORDER BY id DESC LIMIT 10")
+        .all(activeBranch)
+        .map((s) => ({ label: s.label, branch: s.branch, tags: parseTagsJson(s.tags_json), bytes: s.bytes, chunks: s.chunks }))
+        .filter((s) => reqTags.length === 0 || reqTags.every((t) => s.tags.includes(t)))
+    : db
+        .prepare("SELECT label, branch, tags_json, bytes_total AS bytes, chunk_count AS chunks FROM sources ORDER BY id DESC LIMIT 10")
+        .all()
+        .map((s) => ({ label: s.label, branch: s.branch || "main", tags: parseTagsJson(s.tags_json), bytes: s.bytes, chunks: s.chunks }));
 
   const out = JSON.stringify(
     {
@@ -2204,8 +2484,12 @@ async function executeResume(args = {}) {
         id: row.id,
         title: row.title,
         project: row.project,
+        branch: activeBranch,
+        tags: parseTagsJson(row.tags_json),
         conversationId: row.conversation_id,
         filePath: row.file_path,
+        progressPath: fsSync.existsSync(pPath) ? pPath : "",
+        progressMd,
         createdAt: row.created_at,
         summaryMd: summaryFromFile,
       },
@@ -2215,7 +2499,9 @@ async function executeResume(args = {}) {
     null,
     2
   );
-  metrics.returnedBytes += utf8Bytes(out);
+  const retBytes = utf8Bytes(out);
+  metrics.returnedBytes += retBytes;
+  recordMetricEvent("resume", retBytes, retBytes, row.project || "");
   return { isError: false, text: out };
 }
 
@@ -2238,6 +2524,10 @@ function executeStats() {
     .prepare("SELECT label, bytes_total AS bytes, chunk_count AS chunks FROM sources ORDER BY id DESC LIMIT 30")
     .all();
   const handoffCount = Number(db.prepare("SELECT COUNT(*) AS n FROM handoffs").get().n);
+  const branches = db
+    .prepare("SELECT DISTINCT branch FROM handoffs UNION SELECT DISTINCT branch FROM sources")
+    .all()
+    .map((r) => normalizeBranch(r.branch));
 
   const backgroundJobs = [...jobs.values()].map((j) => ({
     jobId: j.jobId,
@@ -2248,6 +2538,60 @@ function executeStats() {
 
   const savedBytes = Math.max(0, metrics.rawBytes - metrics.returnedBytes);
   const savedPct = metrics.rawBytes > 0 ? Number(((savedBytes / metrics.rawBytes) * 100).toFixed(1)) : 0;
+
+  let lifetime = {
+    events: 0,
+    rawProcessed: 0,
+    returnedToContext: 0,
+    savedBytes: 0,
+    savedPct: 0,
+    estTokensSaved: 0,
+    byTool: [],
+  };
+  try {
+    const agg = db
+      .prepare(
+        `SELECT COUNT(*) AS events,
+                COALESCE(SUM(raw_bytes), 0) AS rawProcessed,
+                COALESCE(SUM(returned_bytes), 0) AS returnedToContext,
+                COALESCE(SUM(saved_bytes), 0) AS savedBytes
+         FROM metrics_events`
+      )
+      .get();
+    const rawTotal = Number(agg?.rawProcessed || 0);
+    const retTotal = Number(agg?.returnedToContext || 0);
+    const savedTotal = Number(agg?.savedBytes || 0);
+    const byTool = db
+      .prepare(
+        `SELECT tool,
+                COUNT(*) AS calls,
+                COALESCE(SUM(raw_bytes), 0) AS rawBytes,
+                COALESCE(SUM(returned_bytes), 0) AS returnedBytes,
+                COALESCE(SUM(saved_bytes), 0) AS savedBytes
+         FROM metrics_events
+         GROUP BY tool
+         ORDER BY savedBytes DESC, calls DESC`
+      )
+      .all()
+      .map((r) => ({
+        tool: r.tool,
+        calls: Number(r.calls || 0),
+        rawBytes: Number(r.rawBytes || 0),
+        returnedBytes: Number(r.returnedBytes || 0),
+        savedBytes: Number(r.savedBytes || 0),
+      }));
+    lifetime = {
+      events: Number(agg?.events || 0),
+      rawProcessed: rawTotal,
+      returnedToContext: retTotal,
+      savedBytes: savedTotal,
+      savedPct: rawTotal > 0 ? Number(((savedTotal / rawTotal) * 100).toFixed(1)) : 0,
+      estTokensSaved: Math.round(savedTotal / 4),
+      byTool,
+    };
+  } catch {
+    // Fallback to zeroed lifetime metrics if table is unavailable.
+  }
 
   return {
     isError: false,
@@ -2263,10 +2607,12 @@ function executeStats() {
           savedPct,
           estTokensSaved: Math.round(savedBytes / 4),
         },
+        lifetime,
         stateKeys,
         memoryKeys,
         indexedSources,
         handoffCount,
+        branches,
         backgroundJobs,
       },
       null,

@@ -1,0 +1,742 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Save Token HUD</title>
+  <script src="/preload.js"></script>
+  <style>
+    :root {
+      color-scheme: dark;
+      --hud-bg: #0d1117;
+      --hud-card: #161b22;
+      --hud-head-bg: #21262d;
+      --hud-border: #30363d;
+      --hud-text: #f0f6fc;
+      --hud-muted: #9da7b3;
+      --hud-ok: #3fb950;
+      --hud-warn: #e3b341;
+      --hud-bad: #ff7b72;
+      --hud-accent: #2f81f7;
+      --hud-pill: #21262d;
+    }
+    :root[data-theme="light"] {
+      color-scheme: light;
+      --hud-bg: #f6f8fa;
+      --hud-card: #ffffff;
+      --hud-head-bg: #eaeef2;
+      --hud-border: #d0d7de;
+      --hud-text: #1f2328;
+      --hud-muted: #59636e;
+      --hud-ok: #1a7f37;
+      --hud-warn: #9a6700;
+      --hud-bad: #cf222e;
+      --hud-accent: #0969da;
+      --hud-pill: #eaeef2;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      background: var(--hud-bg);
+      color: var(--hud-text);
+    }
+    body {
+      margin: 0;
+      padding: 8px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      font-size: 12px;
+      line-height: 1.35;
+    }
+    .topbar {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      margin-bottom: 8px;
+    }
+    .top-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+    }
+    .brand {
+      font-weight: 700;
+      font-size: 12.5px;
+      color: var(--hud-text);
+      white-space: nowrap;
+    }
+    .top-actions {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+    .live-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      font-size: 10.5px;
+      font-weight: 600;
+      padding: 2px 7px;
+      border-radius: 999px;
+      background: var(--hud-pill);
+      border: 1px solid var(--hud-border);
+      color: var(--hud-muted);
+    }
+    .live-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--hud-warn); }
+    .live-dot.on { background: var(--hud-ok); }
+    .btn {
+      border: 1px solid var(--hud-border);
+      background: var(--hud-pill);
+      color: var(--hud-text);
+      padding: 4px 8px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 11px;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+    .btn:hover { border-color: var(--hud-accent); }
+    .btn:disabled { opacity: 0.55; cursor: not-allowed; }
+    .btn-primary { background: var(--hud-accent); color: #ffffff; border-color: transparent; }
+    .btn-sm { padding: 3px 7px; font-size: 10.5px; }
+    select, select option, input[type="text"] {
+      background: var(--hud-card);
+      color: var(--hud-text);
+    }
+    select, input[type="text"] {
+      width: 100%;
+      border: 1px solid var(--hud-border);
+      border-radius: 6px;
+      padding: 4px 7px;
+      font-size: 11px;
+    }
+    select { text-overflow: ellipsis; }
+    .scope-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 5px;
+      margin-top: 6px;
+    }
+    .card {
+      background: var(--hud-card);
+      border: 1px solid var(--hud-border);
+      border-radius: 8px;
+      padding: 9px 10px;
+      margin-bottom: 7px;
+    }
+    .card-title {
+      font-weight: 700;
+      font-size: 11.5px;
+      color: var(--hud-text);
+      margin-bottom: 6px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 6px;
+    }
+    .hero {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+    }
+    .ring-wrap { position: relative; width: 76px; height: 76px; flex: 0 0 auto; }
+    .ring-wrap svg { transform: rotate(-90deg); width: 76px; height: 76px; }
+    .ring-center {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+    }
+    .ring-pct { font-size: 14.5px; font-weight: 700; color: var(--hud-text); line-height: 1.1; }
+    .ring-sub { font-size: 9.5px; color: var(--hud-muted); }
+    .hero-info { flex: 1 1 auto; min-width: 0; }
+    .model-title {
+      font-weight: 700;
+      font-size: 12.5px;
+      color: var(--hud-text);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .muted { color: var(--hud-muted); font-size: 11px; }
+    .badge {
+      display: inline-block;
+      padding: 2px 7px;
+      border-radius: 999px;
+      font-size: 10.5px;
+      font-weight: 600;
+      background: var(--hud-head-bg);
+      border: 1px solid var(--hud-border);
+      color: var(--hud-text);
+      margin-top: 4px;
+    }
+    .badge.ok { border-color: var(--hud-ok); color: var(--hud-ok); }
+    .badge.warn { border-color: var(--hud-warn); color: var(--hud-warn); }
+    .badge.bad { border-color: var(--hud-bad); color: var(--hud-bad); }
+    .hero-actions {
+      display: flex;
+      gap: 6px;
+      margin-top: 6px;
+      flex-wrap: wrap;
+    }
+    .handoff-box {
+      margin-top: 7px;
+      padding: 7px 8px;
+      border-radius: 6px;
+      border: 1px solid var(--hud-border);
+      background: var(--hud-bg);
+      font-size: 11px;
+    }
+    .handoff-box.bad { border-color: var(--hud-bad); color: var(--hud-bad); }
+    .code-box {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 10.5px;
+      background: var(--hud-card);
+      border: 1px solid var(--hud-border);
+      border-radius: 5px;
+      padding: 4px 6px;
+      margin: 5px 0;
+      word-break: break-all;
+      white-space: pre-wrap;
+      color: var(--hud-text);
+    }
+    .kpi-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 6px;
+      margin-bottom: 7px;
+    }
+    .stat {
+      background: var(--hud-card);
+      border: 1px solid var(--hud-border);
+      border-radius: 8px;
+      padding: 7px 8px;
+      min-width: 0;
+    }
+    .stat-label { font-size: 10.5px; color: var(--hud-muted); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .stat-val { font-size: 14px; font-weight: 700; margin-top: 1px; color: var(--hud-text); font-variant-numeric: tabular-nums; }
+    .stat-sub { font-size: 10px; color: var(--hud-muted); margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .bar-row { margin: 5px 0; }
+    .bar-head { display: flex; justify-content: space-between; font-size: 11px; margin-bottom: 2px; color: var(--hud-text); gap: 6px; }
+    .bar-track { height: 5px; background: var(--hud-pill); border-radius: 999px; overflow: hidden; }
+    .bar-fill { height: 100%; background: var(--hud-accent); border-radius: 999px; }
+    .table-scroll {
+      max-height: 200px;
+      overflow-y: auto;
+      overflow-x: auto;
+      border: 1px solid var(--hud-border);
+      border-radius: 6px;
+    }
+    .table-scroll.tools-scroll { max-height: 165px; }
+    table { width: 100%; border-collapse: collapse; font-size: 11px; color: var(--hud-text); }
+    th, td {
+      text-align: left;
+      padding: 4px 5px;
+      border-bottom: 1px solid var(--hud-border);
+      white-space: nowrap;
+      color: var(--hud-text);
+    }
+    tbody tr:last-child td { border-bottom: none; }
+    thead th {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      background: var(--hud-head-bg);
+      color: var(--hud-text);
+      font-weight: 700;
+      font-size: 10.5px;
+    }
+    th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; }
+    .tag-bad { color: var(--hud-bad); font-weight: 700; }
+    .tag-ok { color: var(--hud-ok); font-weight: 600; }
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <div class="top-row">
+      <div class="brand">Save Token HUD</div>
+      <div class="top-actions">
+        <span class="live-pill" id="sseBadge" title="Đồng bộ thời gian thực">
+          <span class="live-dot" id="sseDot"></span>
+          <span id="sseLabel">Kết nối…</span>
+        </span>
+        <button class="btn btn-sm" id="refreshBtn">Làm mới</button>
+      </div>
+    </div>
+    <select id="sessionSelect" title="Chọn phiên chat"></select>
+  </div>
+
+  <div class="card">
+    <div class="hero">
+      <div class="ring-wrap">
+        <svg viewBox="0 0 100 100">
+          <circle cx="50" cy="50" r="42" fill="none" stroke="var(--hud-pill)" stroke-width="10" />
+          <circle id="ringArc" cx="50" cy="50" r="42" fill="none" stroke="var(--hud-ok)" stroke-width="10"
+            stroke-linecap="round" stroke-dasharray="263.89" stroke-dashoffset="263.89" />
+        </svg>
+        <div class="ring-center">
+          <div class="ring-pct" id="ringPct">0%</div>
+          <div class="ring-sub">Context</div>
+        </div>
+      </div>
+      <div class="hero-info">
+        <div class="model-title" id="modelName">Đang tải…</div>
+        <div class="muted" id="ctxSummary">—</div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+          <div id="ctxAdvice"></div>
+          <span id="cacheWarmthBadge" class="badge hidden"></span>
+        </div>
+        <div class="hero-actions">
+          <button class="btn btn-primary btn-sm" id="handoffBtn">Handoff 0-LLM</button>
+          <button class="btn btn-sm hidden" id="copyCompactBtn" title="Chép lệnh /compact để nén trước khi đổi model">Copy /compact</button>
+        </div>
+        <div class="scope-row">
+          <input type="text" id="branchInput" list="branchList" value="main" placeholder="Nhánh (vd: auth)" title="Nhánh ngữ cảnh dùng chung" />
+          <datalist id="branchList"></datalist>
+          <input type="text" id="tagsInput" placeholder="Nhãn (vd: api, ui)" title="Nhãn lọc chính xác theo chủ đề" />
+        </div>
+      </div>
+    </div>
+    <div id="handoffResultBox" class="handoff-box hidden"></div>
+  </div>
+
+  <div class="kpi-grid">
+    <div class="stat">
+      <div class="stat-label">Cache Hit</div>
+      <div class="stat-val" id="statHit">—</div>
+      <div class="stat-sub" id="statHitSub">—</div>
+    </div>
+    <div class="stat">
+      <div class="stat-label">Tốc độ</div>
+      <div class="stat-val" id="statTps">—</div>
+      <div class="stat-sub" id="statTtft">—</div>
+    </div>
+    <div class="stat">
+      <div class="stat-label">Tổng Token</div>
+      <div class="stat-val" id="statTotalTok">—</div>
+      <div class="stat-sub" id="statCost">—</div>
+    </div>
+  </div>
+
+  <div id="burnCard" class="card">
+    <div class="card-title">
+      <span>Đốt hạn mức 5 giờ / 7 ngày</span>
+      <span class="muted" id="burnTopModel">—</span>
+    </div>
+    <div id="burnRows" class="muted">Đang tải…</div>
+  </div>
+
+  <div id="orchBox" class="card hidden">
+    <div class="card-title"><span>Phân luồng Orchestrator</span></div>
+    <div id="orchModels"></div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">
+      <span>Các lượt gọi gần nhất</span>
+      <span class="muted" id="reqCount">—</span>
+    </div>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Model</th>
+            <th class="num">Mới</th>
+            <th class="num">Cache</th>
+            <th class="num">Hit</th>
+            <th class="num">Out</th>
+          </tr>
+        </thead>
+        <tbody id="reqTbody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><span>Phân bổ Context Window</span></div>
+    <div id="categoriesBox" class="muted">Đang tải…</div>
+  </div>
+
+  <div id="toolsCard" class="card hidden">
+    <div class="card-title">
+      <span>Top công cụ</span>
+      <span class="muted" id="toolsCount">—</span>
+    </div>
+    <div class="table-scroll tools-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th>Công cụ</th>
+            <th class="num">Lượt</th>
+            <th class="num">Thời gian</th>
+            <th class="num">Output</th>
+          </tr>
+        </thead>
+        <tbody id="toolsTbody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <script>
+    const CIRC = 2 * Math.PI * 42;
+    const params = new URLSearchParams(location.search);
+    const uiToken = params.get('token') || '';
+    const apiFetch = (url, opts) => (window.sidecar?.fetch ? window.sidecar.fetch(url, opts) : fetch(url, opts));
+    const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+    const fmtTok = (n) => {
+      if (n == null || !Number.isFinite(n)) return '—';
+      if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
+      if (n >= 1e3) return (n / 1e3).toFixed(1) + 'k';
+      return String(Math.round(n));
+    };
+    const fmtBytes = (b) => {
+      if (b == null || !Number.isFinite(b)) return '—';
+      if (b >= 1048576) return (b / 1048576).toFixed(1) + 'M';
+      if (b >= 1024) return (b / 1024).toFixed(1) + 'K';
+      return Math.round(b) + 'B';
+    };
+    const fmtMs = (ms) => {
+      if (ms == null || !Number.isFinite(ms)) return '—';
+      if (ms >= 1000) return (ms / 1000).toFixed(1) + 's';
+      return Math.round(ms) + 'ms';
+    };
+
+    function parseRgbLuma(colorStr) {
+      const s = String(colorStr || '').trim();
+      const hex = s.match(/^#([0-9a-f]{3,8})$/i);
+      let r, g, b;
+      if (hex) {
+        let h = hex[1];
+        if (h.length === 3 || h.length === 4) h = h.split('').map(c => c + c).join('');
+        r = parseInt(h.slice(0, 2), 16);
+        g = parseInt(h.slice(2, 4), 16);
+        b = parseInt(h.slice(4, 6), 16);
+      } else {
+        const rgb = s.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/i);
+        if (!rgb) return null;
+        r = Number(rgb[1]); g = Number(rgb[2]); b = Number(rgb[3]);
+      }
+      return (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+    }
+
+    function syncHostTheme(cssVars) {
+      const rootStyle = getComputedStyle(document.documentElement);
+      const bg = (cssVars && cssVars['--background']) || rootStyle.getPropertyValue('--background').trim();
+      const fg = (cssVars && cssVars['--foreground']) || rootStyle.getPropertyValue('--foreground').trim();
+      const card = (cssVars && cssVars['--card']) || rootStyle.getPropertyValue('--card').trim();
+      const border = (cssVars && cssVars['--border']) || rootStyle.getPropertyValue('--border').trim();
+      const muted = (cssVars && cssVars['--muted-foreground']) || rootStyle.getPropertyValue('--muted-foreground').trim();
+      const accent = (cssVars && cssVars['--primary']) || rootStyle.getPropertyValue('--primary').trim();
+
+      const luma = parseRgbLuma(bg);
+      if (luma != null) {
+        document.documentElement.setAttribute('data-theme', luma > 0.55 ? 'light' : 'dark');
+      }
+      const docStyle = document.documentElement.style;
+      if (bg) docStyle.setProperty('--hud-bg', bg);
+      if (fg) docStyle.setProperty('--hud-text', fg);
+      if (card) docStyle.setProperty('--hud-card', card);
+      if (border) docStyle.setProperty('--hud-border', border);
+      if (muted) docStyle.setProperty('--hud-muted', muted);
+      if (accent) docStyle.setProperty('--hud-accent', accent);
+    }
+
+    window.addEventListener('message', (event) => {
+      if (event.data?.type === 'theme-change') {
+        syncHostTheme(event.data.payload?.cssVariables || {});
+      }
+    });
+    syncHostTheme();
+
+    async function copyText(txt, btnEl, okText = 'Đã copy') {
+      try {
+        await navigator.clipboard.writeText(txt);
+        if (btnEl) {
+          const prev = btnEl.textContent;
+          btnEl.textContent = okText;
+          setTimeout(() => { btnEl.textContent = prev; }, 1400);
+        }
+      } catch {
+        prompt('Sao chép chuỗi sau:', txt);
+      }
+    }
+
+    let selectedConvId = window.sidecar?.conversationId || params.get('conversationId') || '';
+    let sseSource = null;
+    let sseConvId = null;
+    let sseBranch = 'main';
+    let sseRefreshTimer = null;
+
+    async function loadBranches() {
+      const res = await apiFetch('/api/branches');
+      if (!res.ok) return;
+      const data = await res.json();
+      const dl = document.getElementById('branchList');
+      dl.innerHTML = (data.branches || []).map(b => `<option value="${esc(b.branch)}"></option>`).join('');
+    }
+
+    async function loadSessions() {
+      const res = await apiFetch('/api/sessions');
+      if (!res.ok) return;
+      const data = await res.json();
+      const sel = document.getElementById('sessionSelect');
+      const sessions = data.sessions || [];
+      if (!selectedConvId && sessions.length) selectedConvId = sessions[0].conversationId;
+      sel.innerHTML = sessions.map(s =>
+        `<option value="${esc(s.conversationId)}"${s.conversationId === selectedConvId ? ' selected' : ''}>${esc(s.title)} (${esc(s.conversationId.slice(0, 8))})</option>`
+      ).join('');
+    }
+
+    async function loadSession() {
+      const q = selectedConvId ? `?id=${encodeURIComponent(selectedConvId)}` : '';
+      const res = await apiFetch('/api/session' + q);
+      if (!res.ok) return;
+      const d = await res.json();
+      selectedConvId = d.conversationId || selectedConvId;
+      connectSse(selectedConvId);
+
+      const cw = d.contextWindow || {};
+      const tel = d.telemetry || {};
+      const advice = d.handoffAdvice || { level: 'ok', message: 'Ngữ cảnh ổn định' };
+      const pct = Math.max(0, Math.min(100, Number(cw.usedPercent || 0)));
+      const color = pct >= 80 ? 'var(--hud-bad)' : (pct >= 70 ? 'var(--hud-warn)' : 'var(--hud-ok)');
+
+      const arc = document.getElementById('ringArc');
+      arc.style.strokeDashoffset = String(CIRC * (1 - pct / 100));
+      arc.style.stroke = color;
+      document.getElementById('ringPct').textContent = pct.toFixed(1) + '%';
+      document.getElementById('modelName').textContent = d.modelName || 'Không rõ model';
+      document.getElementById('ctxSummary').textContent =
+        `${fmtTok(cw.usedTokens)} / ${fmtTok(cw.maxTokens)} tok · ${cw.compactions || 0} nén`;
+
+      const badgeCls = advice.level === 'critical' ? 'bad' : (advice.level === 'warn' ? 'warn' : 'ok');
+      document.getElementById('ctxAdvice').innerHTML = `<span class="badge ${badgeCls}">${esc(advice.message)}</span>`;
+
+      const warm = d.cacheWarmth || {};
+      const warmEl = document.getElementById('cacheWarmthBadge');
+      if (warm.status && warm.status !== 'unknown') {
+        const wCls = warm.status === 'cold' ? 'bad' : (warm.status === 'cooling' ? 'warn' : 'ok');
+        warmEl.className = `badge ${wCls}`;
+        warmEl.textContent = warm.label || warm.status;
+        warmEl.title = `Thời gian nghỉ: ${warm.idleSeconds ?? '?'}s / TTL ${warm.ttlSeconds || 300}s`;
+      } else {
+        warmEl.className = 'badge hidden';
+      }
+
+      const sa = d.switchAdvice || {};
+      const compactBtn = document.getElementById('copyCompactBtn');
+      if (sa.shouldCompactBeforeSwitch) {
+        compactBtn.classList.remove('hidden');
+        compactBtn.textContent = `Copy /compact (-${sa.savedPercent || 0}%)`;
+        compactBtn.title = sa.reason || 'Chép lệnh /compact để nén trước khi đổi model';
+      } else {
+        compactBtn.classList.add('hidden');
+      }
+
+      document.getElementById('statHit').textContent = tel.cacheHitPercent != null ? tel.cacheHitPercent + '%' : '—';
+      document.getElementById('statHitSub').textContent = `${fmtTok(tel.cacheReadTokens)} / ${fmtTok(tel.inputTokens)}`;
+      document.getElementById('statTps').textContent = tel.latestTps != null ? `${tel.latestTps}` : (tel.tps != null ? `${tel.tps}` : '—');
+      document.getElementById('statTtft').textContent = tel.avgTtftMs != null ? `tok/s · TTFT ${(tel.avgTtftMs / 1000).toFixed(1)}s` : 'tok/s';
+      document.getElementById('statTotalTok').textContent = fmtTok(tel.totalTokens);
+      document.getElementById('statCost').textContent = d.estimatedCostUsd != null ? `~$${d.estimatedCostUsd} · ${tel.requestCount || 0} req` : `${tel.requestCount || 0} req · Out ${fmtTok(tel.outputTokens)}`;
+
+      const models = cw.models || [];
+      const orchBox = document.getElementById('orchBox');
+      if (models.length > 1) {
+        orchBox.classList.remove('hidden');
+        document.getElementById('orchModels').innerHTML = models.map(m => `
+          <div class="bar-row">
+            <div class="bar-head"><span>${esc(m.shortName || m.fullName)} (${esc(m.role)})${m.isCurrent ? ' ★' : ''}</span><span>${m.usedPercent}% (${fmtTok(m.usedTokens)})</span></div>
+            <div class="bar-track"><div class="bar-fill" style="width:${Math.min(100, m.usedPercent || 0)}%;background:${m.usedPercent >= 80 ? 'var(--hud-bad)' : (m.usedPercent >= 70 ? 'var(--hud-warn)' : 'var(--hud-accent)')}"></div></div>
+          </div>`).join('');
+      } else {
+        orchBox.classList.add('hidden');
+      }
+
+      const reqs = d.recentRequests || [];
+      document.getElementById('reqCount').textContent = `${reqs.length} lượt`;
+      document.getElementById('reqTbody').innerHTML = reqs.length
+        ? reqs.map(r => {
+            const stepCls = r.status === 'error' ? ' class="tag-bad" title="Lỗi"' : '';
+            const hitVal = r.cacheHitPercent != null ? r.cacheHitPercent + '%' : '—';
+            const hitCls = r.cacheHitPercent != null && r.cacheHitPercent < 20 && (r.inputTokens || 0) >= 20000 ? 'tag-bad' : 'tag-ok';
+            return `<tr>
+              <td${stepCls}>#${r.stepIndex ?? '?'}</td>
+              <td title="${esc(r.model || '')}">${esc(r.shortModel || r.model || '')}</td>
+              <td class="num">${fmtTok(r.inputTokens)}</td>
+              <td class="num">${fmtTok(r.cacheReadTokens)}</td>
+              <td class="num ${hitCls}">${hitVal}</td>
+              <td class="num">${fmtTok(r.outputTokens)}</td>
+            </tr>`;
+          }).join('')
+        : '<tr><td colspan="6" class="muted">Chưa có lượt gọi nào.</td></tr>';
+
+      const cats = (cw.categories || []).filter(c => c.key !== 'free' && c.tokens > 0);
+      const maxBase = cw.maxTokens || cw.usedTokens || 1;
+      document.getElementById('categoriesBox').innerHTML = cats.length
+        ? cats.map(c => {
+            const p = c.percent != null ? c.percent : Number(((c.tokens / maxBase) * 100).toFixed(1));
+            return `<div class="bar-row">
+              <div class="bar-head"><span>${esc(c.label)}</span><span>${fmtTok(c.tokens)} (${p}%)</span></div>
+              <div class="bar-track"><div class="bar-fill" style="width:${Math.min(100, p)}%"></div></div>
+            </div>`;
+          }).join('')
+        : '<div class="muted">Chưa có dữ liệu phân bổ danh mục.</div>';
+
+      const topTools = d.topTools || [];
+      const toolsCard = document.getElementById('toolsCard');
+      if (topTools.length > 0) {
+        toolsCard.classList.remove('hidden');
+        document.getElementById('toolsCount').textContent = `Top ${topTools.length}`;
+        document.getElementById('toolsTbody').innerHTML = topTools.map(t => `<tr>
+          <td>${esc(t.toolName)}</td>
+          <td class="num">${t.calls}</td>
+          <td class="num">${fmtMs(t.totalDurationMs)}</td>
+          <td class="num">${fmtBytes(t.totalOutputBytes)}</td>
+        </tr>`).join('');
+      } else {
+        toolsCard.classList.add('hidden');
+      }
+    }
+
+    async function loadBurn() {
+      const res = await apiFetch('/api/burn');
+      if (!res.ok) return;
+      const b = await res.json();
+      const fmtUsd = (u) => (u != null && u > 0 ? `~$${Number(u).toFixed(2)}` : '$0');
+      const renderRow = (label, w, last) => {
+        if (!w) return '';
+        const hit = w.cacheHitPercent != null ? `${w.cacheHitPercent}% hit` : '—';
+        const cold = w.coldSwitches > 0 ? ` · <span class="tag-bad">${w.coldSwitches} cold</span>` : '';
+        const border = last ? '' : 'border-bottom:1px solid var(--hud-border);';
+        return `<div style="display:flex;justify-content:space-between;gap:6px;padding:3px 0;font-size:11px;${border}">
+          <span><strong>${label}</strong> · ${w.requests || 0} req</span>
+          <span>In ${fmtTok(w.uncachedInputTokens)} · ${hit}${cold} · ${fmtUsd(w.estimatedCostUsd)}</span>
+        </div>`;
+      };
+      const w5 = b.window5h || {};
+      const w7 = b.window7d || {};
+      const splitWin = (w5.weightedBurnTokens > 0 ? w5 : w7);
+      const splitTag = w5.weightedBurnTokens > 0 ? '5h' : '7d';
+      const sp = splitWin?.burnSplit || {};
+      const splitLine = splitWin?.weightedBurnTokens > 0
+        ? `<div class="muted" style="margin-top:4px;font-size:10.5px">Tỷ trọng đốt (${splitTag}): Output/Think ${sp.outputSharePct ?? 0}% · Input nguội ${sp.uncachedInputSharePct ?? 0}% · Cache ${sp.cacheReadSharePct ?? 0}%</div>`
+        : '';
+      document.getElementById('burnTopModel').textContent = w5.topModel || w7.topModel || '—';
+      document.getElementById('burnRows').innerHTML =
+        renderRow('5 giờ', w5, false) + renderRow('7 ngày', w7, true) + splitLine;
+    }
+
+    async function refreshAll() {
+      await Promise.all([loadSessions(), loadBranches(), loadBurn()]);
+      await loadSession();
+    }
+
+    function setSseUi(connected, label) {
+      document.getElementById('sseDot').classList.toggle('on', Boolean(connected));
+      document.getElementById('sseLabel').textContent = label;
+    }
+
+    function currentBranchVal() {
+      return (document.getElementById('branchInput').value || 'main').trim() || 'main';
+    }
+
+    function connectSse(convId) {
+      const nextId = convId || '';
+      const nextBranch = currentBranchVal();
+      if (sseSource && sseConvId === nextId && sseBranch === nextBranch) return;
+      if (sseSource) {
+        try { sseSource.close(); } catch {}
+        sseSource = null;
+      }
+      sseConvId = nextId;
+      sseBranch = nextBranch;
+      if (typeof EventSource !== 'function') {
+        setSseUi(false, '30s');
+        return;
+      }
+      const qs = new URLSearchParams();
+      if (nextId) qs.set('id', nextId);
+      if (nextBranch) qs.set('branch', nextBranch);
+      const tagsVal = (document.getElementById('tagsInput').value || '').trim();
+      if (tagsVal) qs.set('tags', tagsVal);
+      if (uiToken) qs.set('token', uiToken);
+      sseSource = new EventSource('/api/events?' + qs.toString());
+      sseSource.addEventListener('connected', () => setSseUi(true, 'Live'));
+      sseSource.addEventListener('update', () => {
+        if (sseRefreshTimer) clearTimeout(sseRefreshTimer);
+        sseRefreshTimer = setTimeout(() => {
+          if (document.visibilityState === 'visible') refreshAll();
+        }, 250);
+      });
+      sseSource.onerror = () => setSseUi(false, '30s');
+    }
+
+    document.getElementById('sessionSelect').addEventListener('change', (e) => {
+      selectedConvId = e.target.value;
+      loadSession();
+    });
+    document.getElementById('branchInput').addEventListener('change', () => {
+      connectSse(selectedConvId);
+    });
+    document.getElementById('refreshBtn').addEventListener('click', refreshAll);
+    document.getElementById('copyCompactBtn').addEventListener('click', (ev) => {
+      copyText('/compact', ev.target, 'Đã copy /compact');
+    });
+
+    document.getElementById('handoffBtn').addEventListener('click', async () => {
+      const btn = document.getElementById('handoffBtn');
+      const box = document.getElementById('handoffResultBox');
+      const branch = currentBranchVal();
+      const tags = (document.getElementById('tagsInput').value || '').split(',').map(s => s.trim()).filter(Boolean);
+      btn.disabled = true;
+      btn.textContent = 'Đang tạo…';
+      try {
+        const res = await apiFetch('/api/handoff', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ conversationId: selectedConvId || undefined, branch, tags, maxChars: 3800 }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'handoff_failed');
+        loadBranches();
+        const resumeCmd = data.resumeByBranchCommand || data.resumeCommand;
+        const nextPrompt = `Hãy gọi ${resumeCmd} (hoặc đọc file ${data.progressPath || data.filePath}) để nạp đúng nhánh "${data.branch}" với 0 token LLM.`;
+        box.classList.remove('hidden', 'bad');
+        box.innerHTML = `
+          <div><strong>Nhánh <code>${esc(data.branch)}</code>:</strong> <code>${esc(data.handoffId)}</code> (~${data.estTokens} tok)</div>
+          <div class="code-box">${esc(resumeCmd)}</div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap">
+            <button class="btn btn-sm btn-primary" id="copyResumeCmdBtn">Copy Resume</button>
+            <button class="btn btn-sm" id="openNewChatBtn">Mở chat mới</button>
+          </div>`;
+        document.getElementById('copyResumeCmdBtn').onclick = (ev) => copyText(resumeCmd, ev.target);
+        document.getElementById('openNewChatBtn').onclick = async (ev) => {
+          if (window.sidecar?.agent?.startConversation) {
+            await window.sidecar.agent.startConversation(nextPrompt, `Nối tiếp: ${data.title}`);
+          } else {
+            await copyText(nextPrompt, ev.target, 'Đã copy prompt');
+          }
+        };
+      } catch (err) {
+        box.classList.remove('hidden');
+        box.classList.add('bad');
+        box.textContent = 'Lỗi tạo Handoff: ' + (err?.message || String(err));
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Handoff 0-LLM';
+      }
+    });
+
+    refreshAll().then(() => connectSse(selectedConvId));
+    setInterval(() => {
+      if (document.visibilityState === 'visible') refreshAll();
+    }, 30000);
+  </script>
+</body>
+</html>

@@ -8,6 +8,8 @@ import { createReadStream, existsSync, mkdirSync, readdirSync, readFileSync, sta
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
+import { fileURLToPath } from "node:url";
+import { resolveDataDir } from "./storage-paths.mjs";
 
 const DEFAULT_MAX_CHARS = 4500;
 const MIN_MAX_CHARS = 1000;
@@ -67,7 +69,7 @@ function getBrainRoot() {
 
 function getDistillCacheDir() {
   const envDir = process.env.SAVE_TOKEN_DISTILL_DIR?.trim();
-  return envDir || join(homedir(), ".gemini", "antigravity", "plugin_data", "save-token", "distilled");
+  return envDir || join(resolveDataDir(process.env), "distilled");
 }
 
 function findTranscriptPath(convDir) {
@@ -279,18 +281,150 @@ async function runQueryLookup(conv, queryText, maxChars) {
   return clipMultiline(chunks.join("\n"), maxChars);
 }
 
-async function distillConversation(conv, maxChars, cacheFile) {
-  let stepCount = 0;
-  let userTurnCount = 0;
-  let lastCreatedAt = "";
-  let firstUserPrompt = "";
-  const recentPrompts = [];
-  const seenPrompts = new Set();
-  const assistantReplies = [];
-  const touchedFiles = new Map();
-  let lastPlan = "";
-  let lastCheckpoint = "";
-  const recentErrors = [];
+function pushUniqueLimited(list, item, maxLen, clipLen = 170) {
+  const clean = clip(item, clipLen);
+  if (!clean) return;
+  if (!list.includes(clean)) {
+    list.push(clean);
+    if (list.length > maxLen) list.shift();
+  }
+}
+
+function extractAnchorSignals(text, { isUser = false, decisions = [], rejectedApproaches = [], testStatus = [], touchedSymbols = [] } = {}) {
+  const lines = String(text || "").split(/\r?\n/);
+  for (const rawLn of lines) {
+    const ln = rawLn.replace(/^[\s\-*•]+/, "").trim();
+    if (!ln || ln.length < 12 || ln.length > 260) continue;
+    if (/(?:không dùng|bỏ qua|tránh|loại bỏ|gỡ bỏ|thay vì|tuyệt đối không|do not|don't|never|avoid|skip|removed)\b/i.test(ln)) {
+      pushUniqueLimited(rejectedApproaches, ln, 5, 160);
+    }
+    if (!isUser && /(?:đã hoàn tất|đã chốt|chọn hướng|quyết định|cập nhật|đã sửa|implemented|fixed|switched to|added|updated|gỡ bỏ)\b/i.test(ln)) {
+      pushUniqueLimited(decisions, ln, 6, 160);
+    }
+    if (/(?:ALL \d+ TESTS PASSED|ALL HUD TESTS PASSED|ALL INSTALLER TESTS PASSED|\bPASS\b|\bFAIL\b|Command exited with code \d+)/i.test(ln)) {
+      pushUniqueLimited(testStatus, ln, 4, 150);
+    }
+  }
+  if (!isUser) {
+    const symRe = /`([A-Za-z_][\w$.-]{2,48})(?:\(\))?`/g;
+    let m;
+    while ((m = symRe.exec(String(text || ""))) !== null) {
+      const sym = m[1];
+      if (/^(?:true|false|null|undefined|json|node|http|https|utf8)$/i.test(sym)) continue;
+      if (!touchedSymbols.includes(sym)) {
+        touchedSymbols.push(sym);
+        if (touchedSymbols.length > 14) touchedSymbols.shift();
+      }
+    }
+  }
+}
+
+function extractBlockText(content) {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((b) => {
+      if (typeof b === "string") return b;
+      if (b && typeof b === "object" && (b.type === "text" || b.type === "input_text" || b.type === "output_text")) {
+        return String(b.text || "");
+      }
+      return "";
+    })
+    .filter(Boolean)
+    .join("\n");
+}
+
+function normalizeMultiPlatformRecord(o) {
+  if (!o || typeof o !== "object") return null;
+  const rawType = String(o.type || "");
+  if (["USER_INPUT", "PLANNER_RESPONSE", "CHECKPOINT", "ERROR_MESSAGE", "GENERIC"].includes(rawType)) {
+    return null; // Handled directly by Antigravity branch
+  }
+
+  const createdAt = o.timestamp || o.created_at || "";
+  // Claude Code JSONL
+  if ((rawType === "user" || rawType === "assistant") && (o.message || o.content != null)) {
+    const msg = o.message && typeof o.message === "object" ? o.message : o;
+    const role = msg.role || rawType;
+    const content = msg.content ?? o.content;
+    const toolUses = [];
+    const errors = [];
+    if (Array.isArray(content)) {
+      for (const b of content) {
+        if (!b || typeof b !== "object") continue;
+        if (b.type === "tool_use") {
+          toolUses.push({ name: b.name || "", args: b.input || {} });
+        } else if (b.type === "tool_result" && b.is_error) {
+          const errTxt = typeof b.content === "string" ? b.content : extractBlockText(b.content);
+          if (errTxt) errors.push(errTxt);
+        }
+      }
+    }
+    return { role: role === "user" ? "user" : "assistant", text: extractBlockText(content), toolUses, errors, createdAt };
+  }
+
+  // Codex CLI JSONL
+  if (rawType === "response_item" && o.payload && typeof o.payload === "object") {
+    const p = o.payload;
+    if (p.role === "user" || p.role === "assistant") {
+      return { role: p.role, text: extractBlockText(p.content), toolUses: [], errors: [], createdAt };
+    }
+    if (p.type === "function_call") {
+      let args = {};
+      try {
+        args = typeof p.arguments === "string" ? JSON.parse(p.arguments) : (p.arguments || {});
+      } catch {}
+      return { role: "assistant", text: "", toolUses: [{ name: p.name || "", args }], errors: [], createdAt };
+    }
+  }
+  if (rawType === "event_msg" && o.payload && typeof o.payload === "object") {
+    if (o.payload.type === "user_message") {
+      return { role: "user", text: String(o.payload.message || ""), toolUses: [], errors: [], createdAt };
+    }
+    if (o.payload.type === "agent_message") {
+      return { role: "assistant", text: String(o.payload.message || ""), toolUses: [], errors: [], createdAt };
+    }
+  }
+
+  // Generic chat JSONL
+  if (o.role === "user" || o.role === "assistant") {
+    return { role: o.role, text: extractBlockText(o.content), toolUses: [], errors: [], createdAt };
+  }
+  return null;
+}
+
+async function distillConversationDetailed(conv, maxChars, cacheFile, opts = {}) {
+  const anchorFile = cacheFile ? `${cacheFile.replace(/\.md$/i, "")}.anchor.json` : "";
+  let prevAnchor = null;
+  if (!opts.noCache && opts.incremental !== false && anchorFile && existsSync(anchorFile)) {
+    try {
+      const parsed = JSON.parse(readFileSync(anchorFile, "utf8"));
+      if (parsed && parsed.version === 1 && Number(conv.stat?.size || 0) >= Number(parsed.sourceSize || 0)) {
+        prevAnchor = parsed;
+      }
+    } catch {
+      prevAnchor = null;
+    }
+  }
+
+  let stepCount = prevAnchor ? Number(prevAnchor.stepCount || 0) : 0;
+  let userTurnCount = prevAnchor ? Number(prevAnchor.userTurnCount || 0) : 0;
+  let lastCreatedAt = prevAnchor ? String(prevAnchor.lastCreatedAt || "") : "";
+  let firstUserPrompt = prevAnchor ? String(prevAnchor.firstUserPrompt || "") : "";
+  const recentPrompts = prevAnchor && Array.isArray(prevAnchor.recentPrompts) ? [...prevAnchor.recentPrompts] : [];
+  const seenPrompts = new Set(recentPrompts);
+  const assistantReplies = prevAnchor && Array.isArray(prevAnchor.assistantReplies) ? [...prevAnchor.assistantReplies] : [];
+  const touchedFiles = new Map(prevAnchor && Array.isArray(prevAnchor.touchedFiles) ? prevAnchor.touchedFiles : []);
+  let lastPlan = prevAnchor ? String(prevAnchor.lastPlan || "") : "";
+  let lastCheckpoint = prevAnchor ? String(prevAnchor.lastCheckpoint || "") : "";
+  const recentErrors = prevAnchor && Array.isArray(prevAnchor.recentErrors) ? [...prevAnchor.recentErrors] : [];
+  const decisions = prevAnchor && Array.isArray(prevAnchor.decisions) ? [...prevAnchor.decisions] : [];
+  const rejectedApproaches = prevAnchor && Array.isArray(prevAnchor.rejectedApproaches) ? [...prevAnchor.rejectedApproaches] : [];
+  const testStatus = prevAnchor && Array.isArray(prevAnchor.testStatus) ? [...prevAnchor.testStatus] : [];
+  const touchedSymbols = prevAnchor && Array.isArray(prevAnchor.touchedSymbols) ? [...prevAnchor.touchedSymbols] : [];
+  const prevLastStep = prevAnchor ? Number(prevAnchor.lastStepIndex ?? -1) : -1;
+  let maxSeenStep = prevLastStep;
+  let deltaSteps = 0;
 
   const pushPrompt = (p) => {
     if (!p || seenPrompts.has(p)) return;
@@ -307,6 +441,7 @@ async function distillConversation(conv, maxChars, cacheFile) {
     if (recentErrors.length > 3) recentErrors.shift();
   };
 
+  let lineSeq = 0;
   const rl = createInterface({ input: createReadStream(conv.transcriptPath, { encoding: "utf8" }), crlfDelay: Infinity });
   for await (const line of rl) {
     if (!line.trim()) continue;
@@ -316,17 +451,27 @@ async function distillConversation(conv, maxChars, cacheFile) {
     } catch {
       continue;
     }
+    const stepNum = Number.isFinite(Number(o.step_index)) ? Number(o.step_index) : lineSeq;
+    lineSeq += 1;
+    if (prevAnchor && stepNum <= prevLastStep) continue;
+
+    deltaSteps += 1;
+    if (stepNum > maxSeenStep) maxSeenStep = stepNum;
     stepCount += 1;
     if (o.created_at) lastCreatedAt = o.created_at;
     const type = String(o.type || "");
 
     if (type === "USER_INPUT") {
       userTurnCount += 1;
-      for (const p of extractUserPromptsFromContent(o.content)) pushPrompt(p);
+      for (const p of extractUserPromptsFromContent(o.content)) {
+        pushPrompt(p);
+        extractAnchorSignals(p, { isUser: true, rejectedApproaches, testStatus });
+      }
     } else if (type === "PLANNER_RESPONSE") {
       if (typeof o.content === "string" && o.content.trim().length > 20) {
         assistantReplies.push(o.content.trim());
         if (assistantReplies.length > 2) assistantReplies.shift();
+        extractAnchorSignals(o.content, { isUser: false, decisions, rejectedApproaches, testStatus, touchedSymbols });
       }
       if (Array.isArray(o.tool_calls)) {
         for (const tc of o.tool_calls) {
@@ -349,9 +494,74 @@ async function distillConversation(conv, maxChars, cacheFile) {
     } else if (type === "ERROR_MESSAGE" && typeof o.content === "string") {
       pushError(o.content);
     } else if (type === "GENERIC" && typeof o.content === "string") {
+      extractAnchorSignals(o.content, { isUser: false, testStatus });
       if (/Command exited with code [1-9]|Encountered error in/i.test(o.content)) {
         pushError(o.content);
       }
+    } else {
+      const norm = normalizeMultiPlatformRecord(o);
+      if (norm) {
+        if (norm.createdAt && !o.created_at) lastCreatedAt = norm.createdAt;
+        if (norm.role === "user") {
+          userTurnCount += 1;
+          for (const p of extractUserPromptsFromContent(norm.text)) {
+            pushPrompt(p);
+            extractAnchorSignals(p, { isUser: true, rejectedApproaches, testStatus });
+          }
+        } else {
+          if (norm.text && norm.text.trim().length > 20) {
+            assistantReplies.push(norm.text.trim());
+            if (assistantReplies.length > 2) assistantReplies.shift();
+            extractAnchorSignals(norm.text, { isUser: false, decisions, rejectedApproaches, testStatus, touchedSymbols });
+          }
+          for (const tc of norm.toolUses || []) {
+            const tName = String(tc?.name || "");
+            const args = tc?.args || {};
+            if (/^(?:edit|write|multiedit|edit_file|write_file|replace_file_content|apply_patch)$/i.test(tName)) {
+              const p = toPosix(args.file_path || args.Path || args.path || "");
+              if (p && !NOISE_PATH_RE.test(p)) {
+                const prev = touchedFiles.get(p) || 0;
+                touchedFiles.delete(p);
+                touchedFiles.set(p, prev + 1);
+              }
+            }
+          }
+        }
+        for (const errText of norm.errors || []) {
+          pushError(errText);
+        }
+      }
+    }
+  }
+
+  if (anchorFile && conv.stat) {
+    try {
+      mkdirSync(dirname(anchorFile), { recursive: true });
+      writeFileSync(
+        anchorFile,
+        JSON.stringify({
+          version: 1,
+          sourceSize: Number(conv.stat.size || 0),
+          lastStepIndex: maxSeenStep,
+          stepCount,
+          userTurnCount,
+          lastCreatedAt,
+          firstUserPrompt,
+          recentPrompts,
+          assistantReplies,
+          touchedFiles: [...touchedFiles.entries()],
+          touchedSymbols,
+          decisions,
+          rejectedApproaches,
+          testStatus,
+          lastPlan,
+          lastCheckpoint,
+          recentErrors,
+        }),
+        "utf8"
+      );
+    } catch {
+      // Fail-open on read-only cache dirs.
     }
   }
 
@@ -376,8 +586,8 @@ async function distillConversation(conv, maxChars, cacheFile) {
 
   const latestReply = assistantReplies[assistantReplies.length - 1] || "";
   const prevReply = assistantReplies.length > 1 ? assistantReplies[assistantReplies.length - 2] : "";
-  const replyMax = clamp(Math.floor(maxChars * 0.36), 600, 1600, 1400);
-  const prevMax = clamp(Math.floor(maxChars * 0.12), 240, 500, 420);
+  const replyMax = clamp(Math.floor(maxChars * 0.32), 550, 1500, 1300);
+  const prevMax = clamp(Math.floor(maxChars * 0.12), 220, 480, 400);
 
   const sections = [
     `# Distilled Context: ${conv.id}`,
@@ -386,34 +596,91 @@ async function distillConversation(conv, maxChars, cacheFile) {
     "## 1. Mục tiêu & Yêu cầu người dùng",
     promptBullets.length > 0 ? promptBullets.join("\n") : "- (Không có USER_INPUT dạng text)",
     "",
-    "## 2. Kết luận & Trạng thái mới nhất",
+    "## 2. Kết luận & Quyết định đã chốt",
     latestReply ? clipMultiline(latestReply, replyMax) : "(Chưa có phản hồi kết luận từ model)",
   ];
 
+  if (decisions.length > 0) {
+    sections.push("", "### Quyết định & Tiến độ đã neo", ...decisions.map((d) => `- ${d}`));
+  }
   if (prevReply && maxChars >= 3000) {
     sections.push("", "### Phản hồi liền trước (rút gọn)", clipMultiline(prevReply, prevMax));
+  }
+  if (rejectedApproaches.length > 0) {
+    sections.push("", "## 3. Phương án đã loại & Ràng buộc tránh", ...rejectedApproaches.map((r) => `- ${r}`));
   }
 
   const planOrCheckpoint = lastCheckpoint || lastPlan;
   if (planOrCheckpoint) {
-    sections.push("", lastCheckpoint ? "## 3. Checkpoint gần nhất" : "## 3. Kế hoạch gần nhất", clipMultiline(planOrCheckpoint, 500));
+    sections.push("", lastCheckpoint ? "## 4. Checkpoint gần nhất" : "## 4. Kế hoạch gần nhất", clipMultiline(planOrCheckpoint, 480));
   }
   if (orderedFiles.length > 0) {
-    sections.push("", "## 4. Tệp đã tạo / chỉnh sửa (mới nhất trước)");
+    sections.push("", "## 5. Tệp & Biểu tượng đã sửa (mới nhất trước)");
     for (const [fp, n] of orderedFiles) sections.push(`- \`${fp}\` (${n}x)`);
+    if (touchedSymbols.length > 0) {
+      sections.push(`- Symbols: ${touchedSymbols.slice(-8).map((s) => `\`${s}\``).join(", ")}`);
+    }
   }
   if (artifacts.length > 0) {
-    sections.push("", "## 5. Artifacts", artifacts.map((a) => `- \`${a}\``).join("\n"));
+    sections.push("", "## 6. Artifacts", artifacts.map((a) => `- \`${a}\``).join("\n"));
   }
-  if (recentErrors.length > 0) {
-    sections.push("", "## 6. Lỗi gần nhất", ...recentErrors.map((e) => `- ${e}`));
+  if (testStatus.length > 0 || recentErrors.length > 0) {
+    sections.push("", "## 7. Trạng thái kiểm thử & Lỗi gần nhất");
+    for (const t of testStatus) sections.push(`- [Test] ${t}`);
+    for (const e of recentErrors) sections.push(`- [Error] ${e}`);
   }
 
   const tip = `Tip: cần tra chi tiết cụ thể trong phiên này, chạy thêm --query "<từ khóa>" (không đọc thô transcript.jsonl).`;
   const reservedTip = `\n\n${tip}`;
   const bodyBudget = Math.max(400, maxChars - reservedTip.length);
   const body = clipMultiline(sections.join("\n"), bodyBudget);
-  return `${body}${reservedTip}`;
+  const summaryMd = `${body}${reservedTip}`;
+  return {
+    summaryMd,
+    title: clip(firstUserPrompt || `Phiên ${String(conv.id || "").slice(0, 8)}`, 72),
+    workspace,
+    firstUserPrompt,
+    touchedFiles: orderedFiles.map(([fp]) => fp),
+    recentErrors,
+    stepCount,
+    userTurnCount,
+    anchored: {
+      lastStepIndex: maxSeenStep,
+      deltaSteps,
+      decisions,
+      rejectedApproaches,
+      testStatus,
+    },
+  };
+}
+
+async function distillConversation(conv, maxChars, cacheFile) {
+  const details = await distillConversationDetailed(conv, maxChars, cacheFile);
+  return details.summaryMd;
+}
+
+/** Zero-LLM transcript distiller helper importable by hooks/sidecars without spawning CLI. */
+export async function distillTranscriptFile(transcriptPath, { conversationId = "", maxChars = 3600, cacheDir = getDistillCacheDir(), noCache = false, incremental = true } = {}) {
+  const resolvedPath = String(transcriptPath || "").trim();
+  if (!resolvedPath || !existsSync(resolvedPath)) {
+    throw new Error(`Transcript not found: ${resolvedPath}`);
+  }
+  const st = statSync(resolvedPath);
+  let convDir = "";
+  if (/[\\/]\.system_generated[\\/]logs[\\/]/i.test(resolvedPath)) {
+    convDir = dirname(dirname(dirname(resolvedPath)));
+  }
+  const inferredId = conversationId || (convDir ? convDir.split(/[\\/]/).pop() : "session");
+  const cappedChars = clamp(maxChars, MIN_MAX_CHARS, MAX_MAX_CHARS, 3600);
+  const cacheFile = join(cacheDir, `${inferredId}.md`);
+  const sourceSig = `<!-- source-sig:${Math.trunc(st.mtimeMs)}:${st.size}:${cappedChars} -->`;
+  const details = await distillConversationDetailed(
+    { id: inferredId, dirPath: convDir, transcriptPath: resolvedPath, stat: st },
+    cappedChars,
+    cacheFile,
+    { noCache, incremental }
+  );
+  return { ...details, sourceSig };
 }
 
 async function main() {
@@ -459,7 +726,13 @@ async function main() {
   process.stdout.write(`${distilled}\n`);
 }
 
-main().catch((err) => {
-  process.stderr.write(`[distill-chat] Error: ${err?.message || String(err)}\n`);
-  process.exit(1);
-});
+const isEntry =
+  process.argv[1] &&
+  toPosix(process.argv[1]).toLowerCase() === toPosix(fileURLToPath(import.meta.url)).toLowerCase();
+
+if (isEntry) {
+  main().catch((err) => {
+    process.stderr.write(`[distill-chat] Error: ${err?.message || String(err)}\n`);
+    process.exit(1);
+  });
+}
