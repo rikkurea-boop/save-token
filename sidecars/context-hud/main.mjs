@@ -2,11 +2,15 @@
  * Save Token Context HUD — Streamlined HTTP/SSE Sidecar Server.
  * Focuses exclusively on live session context telemetry, SSE updates, and 0-LLM handoffs.
  */
+import { execFile } from 'node:child_process';
 import { existsSync, readFileSync, watch } from 'node:fs';
 import { createServer } from 'node:http';
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
+
+const execFileAsync = promisify(execFile);
 
 import { CONV_ID_RE, createAntigravityAdapter } from './adapters/antigravity.mjs';
 import { createHandoffStore, normalizeBranch, normalizeTags } from './handoff-store.mjs';
@@ -129,10 +133,66 @@ function readJsonBody(req, maxBytes = MAX_BODY_BYTES) {
   });
 }
 
+function extractConvId(result) {
+  return String(
+    result?.conversationId ||
+    result?.conversation?.id ||
+    result?.response?.conversationId ||
+    result?.response?.conversation?.id ||
+    result?.id ||
+    ''
+  ).trim();
+}
+
+async function defaultRunAgentApi(args, { projectId } = {}) {
+  const env = { ...process.env };
+  if (projectId) {
+    env.ANTIGRAVITY_PROJECT_ID = String(projectId);
+  }
+  const exe = process.env.ANTIGRAVITY_AGENTAPI_EXE;
+  const file = exe || 'agentapi';
+  const execArgs = exe ? ['agentapi', ...args] : args;
+  const { stdout } = await execFileAsync(file, execArgs, {
+    encoding: 'utf8',
+    env,
+    timeout: 20000,
+  });
+  const trimmed = String(stdout || '').trim();
+  return trimmed ? JSON.parse(trimmed) : {};
+}
+
+async function createConversationViaHttp({ message, title, model, projectId }) {
+  const addr = process.env.ANTIGRAVITY_LS_ADDRESS;
+  const csrf = process.env.ANTIGRAVITY_CSRF_TOKEN;
+  if (!addr || !csrf) {
+    throw new Error('agentapi CLI not found and ANTIGRAVITY_LS_ADDRESS/CSRF_TOKEN unavailable');
+  }
+  const payload = {
+    model: model || 'flash',
+    prompt: [{ text: message }],
+  };
+  if (title) payload.title = title;
+  if (projectId) payload.projectId = projectId;
+  const res = await fetch(`http://${addr}/product.v1.ConversationService/CreateConversation`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Connect-Protocol-Version': '1',
+      'x-antigravity-csrf-token': csrf,
+    },
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(15000),
+  });
+  const text = await res.text();
+  if (!res.ok) throw new Error(`CreateConversation HTTP ${res.status}: ${text}`);
+  return text.trim() ? JSON.parse(text) : {};
+}
+
 export function createHudServer(options = {}) {
   const bindHost = options.host || '127.0.0.1';
   const port = options.port ?? parseInt(process.env.ANTIGRAVITY_SIDECAR_WEB_PORT || process.env.PORT || '4195', 10);
   const uiToken = options.uiToken ?? (process.env.ANTIGRAVITY_SIDECAR_UI_TOKEN || '');
+  const agentApiRunner = typeof options.agentApiRunner === 'function' ? options.agentApiRunner : defaultRunAgentApi;
   const appDataDir = options.appDataDir || resolveAppDataDir();
   const pluginDataDir = options.pluginDataDir || join(appDataDir, 'plugin_data', 'save-token');
   const dbPath = options.dbPath || process.env.SAVE_TOKEN_DB_PATH || join(pluginDataDir, 'store.db');
@@ -442,6 +502,76 @@ export function createHudServer(options = {}) {
           err?.status ||
           (err?.code === 'INVALID_CONVERSATION_ID' ? 400 : err?.code === 'NOT_FOUND' ? 404 : 500);
         sendJson(res, status, { error: err?.message || 'progress_sync_failed' });
+      }
+      return;
+    }
+
+    if (req.method === 'POST' && pathname === '/_sidecar/new-conversation') {
+      try {
+        const body = await readJsonBody(req, MAX_BODY_BYTES);
+        const message = String(body.message || '').trim();
+        if (!message) {
+          sendJson(res, 400, { error: 'missing_message' });
+          return;
+        }
+        const model = String(body.model || 'flash').trim() || 'flash';
+        const title = String(body.title || '').trim().slice(0, 120);
+        const projectId = String(body.projectId || '').trim();
+        const args = ['new-conversation', '--model', model];
+        if (title) args.push('--title', title);
+        args.push(message);
+
+        let result;
+        try {
+          result = await agentApiRunner(args, { projectId });
+        } catch (err) {
+          if (agentApiRunner === defaultRunAgentApi && err?.code === 'ENOENT') {
+            result = await createConversationViaHttp({ message, title, model, projectId });
+          } else {
+            throw err;
+          }
+        }
+        sendJson(res, 200, { ...result, conversationId: extractConvId(result) });
+      } catch (err) {
+        sendJson(res, err?.status || 500, { error: err?.message || 'new_conversation_failed' });
+      }
+      return;
+    }
+
+    if (req.method === 'POST' && pathname === '/_sidecar/get-conversation-metadata') {
+      try {
+        const body = await readJsonBody(req, MAX_BODY_BYTES);
+        const convId = String(body.conversationId || '').trim();
+        if (!convId) {
+          sendJson(res, 400, { error: 'missing_conversation_id' });
+          return;
+        }
+        const result = await agentApiRunner(['get-conversation-metadata', convId]);
+        sendJson(res, 200, result || {});
+      } catch (err) {
+        sendJson(res, err?.status || 500, { error: err?.message || 'get_conversation_metadata_failed' });
+      }
+      return;
+    }
+
+    if (req.method === 'POST' && pathname === '/_sidecar/send-message') {
+      try {
+        const body = await readJsonBody(req, MAX_BODY_BYTES);
+        const convId = String(body.conversationId || '').trim();
+        const message = String(body.message || '').trim();
+        if (!convId || !message) {
+          sendJson(res, 400, { error: 'missing_conversation_or_message' });
+          return;
+        }
+        const title = String(body.title || '').trim().slice(0, 120);
+        const projectId = String(body.projectId || '').trim();
+        const args = ['send-message'];
+        if (title) args.push('--title', title);
+        args.push(convId, message);
+        const result = await agentApiRunner(args, { projectId });
+        sendJson(res, 200, result || {});
+      } catch (err) {
+        sendJson(res, err?.status || 500, { error: err?.message || 'send_message_failed' });
       }
       return;
     }

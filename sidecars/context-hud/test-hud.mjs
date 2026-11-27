@@ -216,6 +216,7 @@ async function main() {
   }
 
   const UI_TOKEN = 'hud-test-secret';
+  const sidecarCalls = [];
   const hud = createHudServer({
     port: 0,
     uiToken: UI_TOKEN,
@@ -223,6 +224,13 @@ async function main() {
     pluginDataDir,
     dbPath,
     handoffDir,
+    agentApiRunner: async (args, runnerOpts = {}) => {
+      sidecarCalls.push({ args, runnerOpts });
+      if (args[0] === 'get-conversation-metadata') {
+        return { response: { conversationMetadata: { metadata: { projectId: 'proj-test' } } } };
+      }
+      return { conversationId: 'e4f5a6b7-1111-2222-3333-444455559999' };
+    },
   });
 
   let sseClient = null;
@@ -249,6 +257,8 @@ async function main() {
     assert.equal(html.includes('copyCompactBtn'), true, 'Expected copyCompactBtn in HUD HTML');
     assert.equal(html.includes('burnCard'), true, 'Expected burnCard in HUD HTML');
     assert.equal(html.includes('cacheWarmthBadge'), true, 'Expected cacheWarmthBadge in HUD HTML');
+    assert.equal(html.includes('startConversation'), true, 'Expected startConversation in HUD HTML');
+    assert.equal(html.includes('toggleConversation'), true, 'Expected toggleConversation in HUD HTML');
 
     const unauthBurn = await reqJson(baseUrl, '/api/burn');
     assert.equal(unauthBurn.status, 401);
@@ -372,6 +382,38 @@ async function main() {
     assert.ok(Array.isArray(autoHd.json.tags) && autoHd.json.tags.length > 0);
 
     console.log('PASS HUD 4-5: 0-LLM POST /api/handoff, auto branch/tags, live /api/progress, FTS5 & SSE');
+
+    // 6. Sidecar SDK routes (/_sidecar/new-conversation & /_sidecar/get-conversation-metadata)
+    const unauthSidecar = await reqJson(baseUrl, '/_sidecar/new-conversation', {
+      method: 'POST',
+      body: { message: 'hello' },
+    });
+    assert.equal(unauthSidecar.status, 401);
+
+    const sidecarNew = await reqJson(baseUrl, '/_sidecar/new-conversation', {
+      method: 'POST',
+      token: UI_TOKEN,
+      body: { message: 'Tiep noi...', title: 'Test', model: 'flash', projectId: 'proj-test' },
+    });
+    assert.equal(sidecarNew.status, 200);
+    assert.equal(sidecarNew.json.conversationId, 'e4f5a6b7-1111-2222-3333-444455559999');
+    const newCall = sidecarCalls.find((c) => c.args[0] === 'new-conversation');
+    assert.ok(newCall, 'Expected mocked agentapi new-conversation call');
+    assert.equal(newCall.args.includes('--model'), true);
+    assert.equal(newCall.args.includes('flash'), true);
+    assert.equal(newCall.args.includes('--title'), true);
+    assert.equal(newCall.args.includes('Test'), true);
+    assert.equal(newCall.runnerOpts.projectId, 'proj-test');
+
+    const sidecarMeta = await reqJson(baseUrl, '/_sidecar/get-conversation-metadata', {
+      method: 'POST',
+      token: UI_TOKEN,
+      body: { conversationId: convId },
+    });
+    assert.equal(sidecarMeta.status, 200);
+    assert.equal(sidecarMeta.json?.response?.conversationMetadata?.metadata?.projectId, 'proj-test');
+
+    console.log('PASS HUD 6: /_sidecar/new-conversation, /_sidecar/get-conversation-metadata & UI conversation switch');
     console.log('ALL HUD TESTS PASSED');
   } finally {
     if (sseClient) sseClient.close();

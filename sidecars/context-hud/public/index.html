@@ -717,10 +717,38 @@
           </div>`;
         document.getElementById('copyResumeCmdBtn').onclick = (ev) => copyText(resumeCmd, ev.target);
         document.getElementById('openNewChatBtn').onclick = async (ev) => {
-          if (window.sidecar?.agent?.startConversation) {
-            await window.sidecar.agent.startConversation(nextPrompt, `Nối tiếp: ${data.title}`);
-          } else {
-            await copyText(nextPrompt, ev.target, 'Đã copy prompt');
+          const openBtn = ev.currentTarget || document.getElementById('openNewChatBtn');
+          openBtn.disabled = true;
+          openBtn.textContent = 'Đang mở…';
+          try {
+            if (window.sidecar?.agent?.startConversation) {
+              const created = await window.sidecar.agent.startConversation(
+                nextPrompt,
+                `Nối tiếp: ${data.title || data.branch}`
+              );
+              const newConvId =
+                created?.conversationId ||
+                created?.conversation?.id ||
+                created?.response?.conversationId ||
+                created?.response?.conversation?.id ||
+                '';
+              if (newConvId && window.sidecar?.ui?.toggleConversation) {
+                window.sidecar.ui.toggleConversation(newConvId);
+              }
+              openBtn.textContent = 'Đã mở chat mới';
+              setTimeout(() => { openBtn.textContent = 'Mở chat mới'; }, 2000);
+            } else {
+              await copyText(nextPrompt, openBtn, 'Đã copy prompt');
+            }
+          } catch (err) {
+            await copyText(nextPrompt, openBtn, 'Lỗi mở -> đã copy');
+            const errNote = document.createElement('div');
+            errNote.className = 'muted';
+            errNote.style.marginTop = '4px';
+            errNote.textContent = 'Không mở được chat mới (' + (err?.message || 'error') + '), đã copy prompt nối tiếp.';
+            box.appendChild(errNote);
+          } finally {
+            openBtn.disabled = false;
           }
         };
       } catch (err) {
